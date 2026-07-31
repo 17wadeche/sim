@@ -975,26 +975,31 @@ Template for output:
 'It was reported that [event context]' and then detail all the specific allegations, signs/symptoms, irregularities, issues, adverse events/outcomes, deaths, and complications (must include device if present). [Include any extra details known about the event (any size, location details, or anything with 'Yes')]. [Troubleshooting steps or interventions performed (if present, otherwise exclude.)]. [Resolution or outcome (if present, otherwise exclude.)]. [Conclusion Statement (if needed)].
 
 Return only the completed event description, with no heading, preface, notes, bullets, or explanation."""
-GFE_PROMPT = """Return exactly either 'Follow-up Needed' or 'No Follow-up Needed', with no explanation:
-
-- No follow-up will be needed for patient information section if there is no patient involvement.
-- Follow up is always needed if:
-  - There's no serial number.
-  - If '* Quantity' is right under 'Serial or Lot Number' we need to follow up for serial number.
-  - A question is not answered and does not have one of the following tagged to the end, beginning, or as the answer:
-    - "if applicable"
-    - "optional"
-    - "if known"
-    - "asked but unknown"
-    - unavailable due to legal or confidential reasons or similar.
-  - If for Healthcare Professional(s) it says "There is no physician (doctor) or other Healthcare Professional associated with this event."
-  - Anything is suspected/unconfirmed. We need to follow up for confirmation.
-- Completely ignore:
-  - "Returns Request Information for ... " section at the very bottom.
-  - Completely ignore the Product Return Status.
-- Notes:
-  - The patient age might be their birthday and it may be below "Specify date".
-  - There may be an "Asked but unknown" under "Unknown" for patient weight."""
+GFE_PROMPT = """Return either 'Follow-up Needed' or 'No Follow-up Needed' and state why (what is missing) very briefly: 
+•	No follow-up will be needed for model number if there is a serial or lot number present. 
+•	Follow up is needed if any of these 6 occur: 
+1. There is no serial or lot number we MUST follow up for that (Note: If '* Quantity' is right under 'Serial or Lot Number' we MUST follow up for that.). 
+   - If there is a Serial number or lot number, you must list it.  
+2. Anything is suspected/unconfirmed. We need to follow up for confirmation. 
+3. If 'How long was the procedure extended due to the product issue?' is 'Unknown'. 
+4. If 'Last Name' or 'First Name' are 'Not specified'. 
+  - If there is a first and last name, you must list it. 
+5. If you see 'Implanted-Remains in Service', we need to follow up for product return. 
+6. If anything at all doesn't seem right (For example, if the date is listed as 2025-Unknown-Unknown). 
+•	Follow up is not needed for a specific question if one of the following is tagged to the end or as the answer: 
+        - "if applicable" 
+        - "optional" 
+        - "if known" 
+        - "asked but unknown" 
+        - unavailable due to legal or confidential reasons or similar. 
+        - "Unknown Asked but unknown"
+•	Completely ignore: 
+   •	"Returns Request Information for ... " section at the very bottom. 
+   •	Completely ignore the Product Return Status 
+•	Notes: 
+   •	The patient age might be their birthday and it may be below "Specify date". 
+   •	There may be an "Asked but unknown" under "Unknown" for patient weight. 
+**If the follow up reason is only for Rule 5: "If 'Last Name' or 'First Name' are 'Not specified'.", then return "Just patient information" at the end of your explanation."""
 BRIEF_DESCRIPTION_PROMPT = (
     "In 3 or 4 words state the issue from the event description. \n"
     "Do not state removed or resolved\n"
