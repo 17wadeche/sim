@@ -1799,17 +1799,32 @@ def append_unique_code(
 def apply_derived_code_rules(
     outputs: Dict[str, List[str]],
     product_analysis_value: str,
+    return_statuses: set,
 ) -> Dict[str, List[str]]:
     derived_outputs = {
         attribute: list(values)
         for attribute, values in outputs.items()
     }
-    if yes_no_value(product_analysis_value) == "No":
-        append_unique_code(derived_outputs, "fdmCodes", "B20")
+    controlled_attributes = {
+        "fdmCodes",
+        "fdrCodes",
+        "fdcCodes",
+        "afcCodes",
+    }
+    if yes_no_value(product_analysis_value) == "Yes":
+        for attribute in controlled_attributes:
+            derived_outputs.pop(attribute, None)
+    else:
+        normalized_discarded = normalized_question_label(
+            "No return-customer discarded"
+        )
+        derived_outputs["fdmCodes"] = [
+            "B18" if normalized_discarded in return_statuses else "B17"
+        ]
         append_unique_code(derived_outputs, "fdrCodes", "C20")
         append_unique_code(derived_outputs, "fdcCodes", "D15")
         append_unique_code(derived_outputs, "afcCodes", "SURNOSAMP1")
-    ordered: Dict[str, List[str]] = {}
+    ordered = {}
     for attribute in PREFERRED_DECISION_ATTRIBUTES:
         if attribute in derived_outputs:
             ordered[attribute] = derived_outputs[attribute]
@@ -2555,6 +2570,15 @@ gfe_default_yes = should_default_gfe_to_yes(qa_pairs, source_text)
 product_analysis_value = product_analysis_needed(
     qa_pairs,
     source_text,
+)
+return_statuses = find_product_return_statuses(
+    qa_pairs,
+    source_text,
+)
+summary["All outputs"] = apply_derived_code_rules(
+    summary["All outputs"],
+    product_analysis_value,
+    return_statuses,
 )
 summary["All outputs"] = apply_derived_code_rules(
     summary["All outputs"],
