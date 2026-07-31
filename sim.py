@@ -1073,6 +1073,7 @@ INVESTIGATION_SUMMARY_REASON = "Forseen in risk/Included in Monitoring"
 NON_ROUTINE_FDM_CODES = {"B21", "B15", "B01"}
 GFE_RETURN_STATUS_QUESTION = "What is the return status?"
 GFE_RETURN_STATUS_ANSWER = "Will be returned"
+RFR_FDD_MAPPING_FILENAME = "rfr_to_fdd.tsv"
 ANALYSIS_LETTER_QUESTION_ALIASES = [
     "Was an analysis letter requested?",
 ]
@@ -1517,6 +1518,25 @@ def parse_text_to_qa(page_texts: List[Tuple[int, str]]) -> List[QAPair]:
         i = 0
         while i < len(lines):
             line = lines[i]
+            if normalized_question_label(line) == "file attachments":
+                flush_current()
+                if i + 1 < len(lines):
+                    attachment_answer = lines[i + 1].strip()
+                    if attachment_answer:
+                        context = " | ".join(recent_answers)
+                        pairs.append(
+                            QAPair(
+                                question="FILE ATTACHMENTS",
+                                answer=attachment_answer,
+                                source="PDF text",
+                                page=page_num,
+                                context=context,
+                                confidence=0.95,
+                            )
+                        )
+                        recent_answers.append(attachment_answer)
+                        i += 2
+                        continue
             m = BULLET_Q_RE.match(line)
             if m:
                 flush_current()
@@ -1777,6 +1797,53 @@ def aggregate_decision_outputs(evidence: List[Dict[str, str]]) -> Dict[str, List
     for attribute in sorted(set(buckets) - set(ordered)):
         ordered[attribute] = buckets[attribute]
     return ordered
+def load_rfr_to_fdd_mapping() -> Dict[str, List[str]]:
+    mapping_path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        RFR_FDD_MAPPING_FILENAME,
+    )
+    mapping: Dict[str, List[str]] = defaultdict(list)
+    try:
+        mapping_df = pd.read_csv(
+            mapping_path,
+            sep="\t",
+            dtype=str,
+            keep_default_na=False,
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            f"Unable to load the RFR-to-FDD mapping file: {mapping_path}"
+        ) from exc
+    required_columns = {"RFR Code", "FDD Code"}
+    if not required_columns.issubset(mapping_df.columns):
+        raise RuntimeError(
+            "The RFR-to-FDD mapping must contain 'RFR Code' and 'FDD Code' columns."
+        )
+    for rfr_code, fdd_code in mapping_df[["RFR Code", "FDD Code"]].itertuples(
+        index=False,
+        name=None,
+    ):
+        normalized_rfr = str(rfr_code).strip().upper()
+        normalized_fdd = str(fdd_code).strip().upper()
+        if (
+            normalized_rfr
+            and normalized_fdd
+            and normalized_fdd not in mapping[normalized_rfr]
+        ):
+            mapping[normalized_rfr].append(normalized_fdd)
+    return dict(mapping)
+def apply_rfr_to_fdd_mapping(
+    outputs: Dict[str, List[str]],
+    mapping: Dict[str, List[str]],
+) -> Dict[str, List[str]]:
+    mapped_outputs = {
+        attribute: list(values)
+        for attribute, values in outputs.items()
+    }
+    for rfr_code in mapped_outputs.get("rfrCodes", []):
+        for fdd_code in mapping.get(str(rfr_code).strip().upper(), []):
+            append_unique_code(mapped_outputs, "fddCodes", fdd_code)
+    return mapped_outputs
 def code_groups_from_outputs(
     outputs: Dict[str, List[str]],
 ) -> List[Dict[str, Any]]:
@@ -2014,8 +2081,14 @@ def product_analysis_needed(
         normalized_question_label(status)
         for status in PRODUCT_ANALYSIS_NO_RETURN_STATUSES
     }
+    attachment_answers = qa_attachment_entries(qa_pairs)
+    attachment_requires_pa = any(
+        normalized_question_label(answer) != "no"
+        for answer in attachment_answers
+    )
     if (
         found_statuses & yes_statuses
+        or attachment_requires_pa
         or attachments_include_mp4(source_text, qa_pairs)
     ):
         return "Yes"
@@ -2493,6 +2566,21 @@ def gfe_value_from_response(gfe_response: str) -> str:
         if "no follow-up needed" in gfe_response.casefold()
         else "Yes"
     )
+def gfe_reason_from_response(
+    gfe_response: Optional[str],
+    defaulted_to_yes: bool,
+) -> Optional[str]:
+    if defaulted_to_yes:
+        return f"Return status is {GFE_RETURN_STATUS_ANSWER}."
+    if not gfe_response or gfe_value_from_response(gfe_response) != "Yes":
+        return None
+    reason = re.sub(
+        r"^\s*follow[- ]?up\s+needed\s*[:\-]?\s*",
+        "",
+        str(gfe_response).strip(),
+        flags=re.IGNORECASE,
+    ).strip()
+    return reason or str(gfe_response).strip()
 AUTO_CLOSURE_REPORTABILITY_DECISIONS = {
     "not reportable",
     "not a complaint",
@@ -2557,6 +2645,7 @@ try:
         include_generic=DEFAULT_INCLUDE_GENERIC,
     )
     summary = summarize(matches)
+    rfr_to_fdd_mapping = load_rfr_to_fdd_mapping()
     medtronic_source = build_medtronic_source(source_text, qa_pairs)
 except Exception as e:
     st.error(f"Unable to process the files: {e}")
@@ -2578,6 +2667,10 @@ product_analysis_value = product_analysis_needed(
 return_statuses = find_product_return_statuses(
     qa_pairs,
     source_text,
+)
+summary["All outputs"] = apply_rfr_to_fdd_mapping(
+    summary["All outputs"],
+    rfr_to_fdd_mapping,
 )
 summary["All outputs"] = apply_derived_code_rules(
     summary["All outputs"],
@@ -2659,6 +2752,7 @@ gfe_value = (
     if gfe_response
     else None
 )
+gfe_reason = gfe_reason_from_response(gfe_response, gfe_default_yes)
 analysis_letter = analysis_letter_value(qa_pairs)
 business_rule_outputs = resolve_business_rule_outputs(
     qa_pairs,
@@ -2744,6 +2838,8 @@ with reportability_col:
     )
     if gfe_value:
         st.markdown(f"**GFE:** {gfe_value}")
+        if gfe_value == "Yes" and gfe_reason:
+            st.markdown(f"**GFE Reason:** {gfe_reason}")
     elif gfe_error:
         st.error(f"Unable to evaluate GFE: {gfe_error}")
     st.markdown(f"**Analysis Letter:** {analysis_letter}")
@@ -2787,6 +2883,11 @@ all_output_rows = (
         }
     ]
     + ([{"Output": "GFE", "Value": gfe_value}] if gfe_value else [])
+    + (
+        [{"Output": "GFE Reason", "Value": gfe_reason}]
+        if gfe_value == "Yes" and gfe_reason
+        else []
+    )
     + [{"Output": "Analysis Letter", "Value": analysis_letter}]
     + [
         {
