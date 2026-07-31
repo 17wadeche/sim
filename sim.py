@@ -2558,7 +2558,6 @@ except Exception as e:
     with st.expander("Technical details"):
         st.code(traceback.format_exc())
     st.stop()
-
 document_id = hashlib.sha256(pdf_bytes).hexdigest()
 token_fingerprint = hashlib.sha256(
     medtronic_api_token.strip().encode("utf-8")
