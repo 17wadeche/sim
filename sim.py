@@ -2751,8 +2751,6 @@ with reportability_col:
     elif gfe_error:
         st.error(f"Unable to evaluate GFE: {gfe_error}")
     st.markdown(f"**Analysis Letter:** {analysis_letter}")
-with rd_close_col:
-    st.markdown(f"**RD close?** {summary['RD close?']}")
 for attribute, label in BUSINESS_RULE_LABELS.items():
     label_suffix = "" if label.endswith("?") else ":"
     st.markdown(
