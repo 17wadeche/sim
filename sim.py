@@ -2584,10 +2584,6 @@ summary["All outputs"] = apply_derived_code_rules(
     product_analysis_value,
     return_statuses,
 )
-summary["All outputs"] = apply_derived_code_rules(
-    summary["All outputs"],
-    product_analysis_value,
-)
 summary["Code groups"] = code_groups_from_outputs(
     summary["All outputs"],
 )
