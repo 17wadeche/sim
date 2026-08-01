@@ -2241,7 +2241,6 @@ def investigation_summary_exclusion_reasons(
     return reasons
 def build_investigation_summary(
     event_description: str,
-    root_cause: str,
 ) -> str:
     description = re.sub(
         r"\s+",
@@ -2253,12 +2252,8 @@ def build_investigation_summary(
     if description[-1] not in ".!?":
         description += "."
     return (
-        f"{description} No product or clinical data was received for evaluation. "
-        "It was determined that the most likely cause of the event is related to "
-        f"{root_cause}. This event was foreseen in risk management and is included "
-        "in monitoring, therefore no further investigation was required. There was "
-        "no indication that the event was related to a possible manufacturing issue, "
-        "therefore no Device History Record review was performed."
+        f"Medtronic conducted an investigation based upon all information received. Medtronic was notified of the following reported condition {description}."
+        "The product sample or additional supporting materials from the account were not available for analysis. Based on the evidence available there was not enough information to make any determination. Without the sample a detailed investigation could not be performed, and definitive cause could not be identified. The suspected or most likely cause of the event could not be determined. A Device History Record (DHR) or Service History Record (SHR) review is not required since there is no indication of a potential manufacturing or servicing issue. Further action was not required because the event had foreseen risk and is included in a data monitoring plan."
     )
 def business_rule_fallbacks(
     complaint_value: Any,
@@ -2809,7 +2804,6 @@ if review_banner == "Review Needed":
     review_banner_placeholder.warning(review_banner)
 else:
     review_banner_placeholder.success(review_banner)
-
 st.subheader("Result Summary")
 st.markdown(f"**Complaint?** {summary['Complaint?']}")
 st.markdown("**Brief Description:**")
