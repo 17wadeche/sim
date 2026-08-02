@@ -930,7 +930,6 @@ MEDTRONIC_CUSTOM_GPT_CONVERSATION_URL_TEMPLATE = (
 )
 EVENT_DESCRIPTION_MODEL = "gpt-52"
 GFE_MODEL = "gpt-52"
-# MedtronicGPT's model alias for OpenAI GPT-4.1.
 PRODUCT_EXTRACTION_MODEL = "gpt-41"
 BRIEF_DESCRIPTION_MODEL = "gpt-41"
 ROOT_CAUSE_MODEL = "gpt-41"
@@ -951,7 +950,6 @@ CUSTOM_GPT_CODE_LABELS = {
     "imgCodes": "IMG",
     "hazCodes": "HAZ",
 }
-CUSTOM_GPT_SCHEMA_RETRY_STATUSES = {400, 415, 422}
 CUSTOM_GPT_POLL_TIMEOUT_SECONDS = 120
 CUSTOM_GPT_POLL_INTERVAL_SECONDS = 1.0
 CUSTOM_GPT_CODE_TOKEN_RE = re.compile(
@@ -975,6 +973,7 @@ CUSTOM_GPT_NON_CODE_TOKENS = {
     "MPXR",
     "PDF",
     "XML",
+    "V2",
 }
 EVENT_DESCRIPTION_PROMPT = """To ensure clarity and adherence to the reporting standards, follow these guidelines when writing a comprehensive, non-redundant, gender neutral, chronological description of an event in the past tense:
 
@@ -3297,72 +3296,6 @@ def custom_gpt_assistant_message(messages: Any) -> Optional[str]:
                 if value:
                     return value
     return None
-def extract_custom_gpt_response_content(payload: Any) -> Optional[str]:
-    if isinstance(payload, str):
-        value = payload.strip()
-        return value or None
-    if isinstance(payload, list):
-        assistant_value = custom_gpt_assistant_message(payload)
-        if assistant_value:
-            return assistant_value
-        for item in reversed(payload):
-            value = extract_custom_gpt_response_content(item)
-            if value:
-                return value
-        return None
-    if not isinstance(payload, dict):
-        return None
-    role = norm(payload.get("role"))
-    if role in {"assistant", "ai", "bot"}:
-        for key in ("content", "text", "message", "answer", "response"):
-            if key in payload:
-                value = custom_gpt_text_content(payload[key])
-                if value:
-                    return value
-    for key in (
-        "answer",
-        "assistantResponse",
-        "assistant_response",
-        "generatedText",
-        "generated_text",
-        "outputText",
-        "output_text",
-        "response",
-    ):
-        if key in payload:
-            value = custom_gpt_text_content(payload[key])
-            if value:
-                return value
-    for key in ("messages", "items", "history"):
-        value = custom_gpt_assistant_message(payload.get(key))
-        if value:
-            return value
-    message = payload.get("message")
-    if (
-        isinstance(message, str)
-        and message.strip()
-        and not any(
-            key in payload
-            for key in ("id", "conversationId", "conversation_id", "status", "state")
-        )
-    ):
-        return message.strip()
-    if isinstance(message, dict):
-        value = extract_custom_gpt_response_content(message)
-        if value:
-            return value
-    for key in ("conversation", "data", "result", "output"):
-        if key in payload:
-            value = extract_custom_gpt_response_content(payload[key])
-            if value:
-                return value
-    if not any(key in payload for key in ("id", "conversationId", "messages")):
-        for key in ("content", "text"):
-            if key in payload:
-                value = custom_gpt_text_content(payload[key])
-                if value:
-                    return value
-    return None
 def extract_custom_gpt_conversation_id(payload: Any) -> Optional[str]:
     if not isinstance(payload, dict):
         return None
@@ -3378,63 +3311,6 @@ def extract_custom_gpt_conversation_id(payload: Any) -> Optional[str]:
     if isinstance(value, (str, int)) and str(value).strip():
         return str(value).strip()
     return None
-def decode_custom_gpt_http_response(response: Any) -> Any:
-    try:
-        return response.json()
-    except ValueError:
-        raw_text = str(response.text or "").strip()
-        if not raw_text:
-            return None
-        event_payloads: List[Any] = []
-        for line in raw_text.splitlines():
-            if not line.startswith("data:"):
-                continue
-            event_text = line[5:].strip()
-            if not event_text or event_text == "[DONE]":
-                continue
-            try:
-                event_payloads.append(json.loads(event_text))
-            except ValueError:
-                event_payloads.append(event_text)
-        return event_payloads or raw_text
-_successful_custom_gpt_payload_style: Optional[str] = None
-def custom_gpt_request_payloads(user_prompt: str) -> List[Tuple[str, Dict[str, Any]]]:
-    payloads = {
-        "message": {"message": user_prompt},
-        "messages": {
-            "messages": [
-                {
-                    "role": "user",
-                    "content": user_prompt,
-                }
-            ]
-        },
-        "prompt": {"prompt": user_prompt},
-        "content": {"content": user_prompt},
-        "input": {"input": user_prompt},
-    }
-    configured_style = os.getenv(
-        "MEDTRONIC_CUSTOM_GPT_PAYLOAD_STYLE",
-        "",
-    ).strip().casefold()
-    if configured_style and configured_style not in payloads:
-        raise ValueError(
-            "MEDTRONIC_CUSTOM_GPT_PAYLOAD_STYLE must be one of: "
-            + ", ".join(payloads)
-        )
-    style_order = [
-        configured_style or _successful_custom_gpt_payload_style,
-        "message",
-        "messages",
-        "prompt",
-        "content",
-        "input",
-    ]
-    ordered_styles: List[str] = []
-    for style in style_order:
-        if style and style not in ordered_styles:
-            ordered_styles.append(style)
-    return [(style, payloads[style]) for style in ordered_styles]
 def custom_gpt_failure_detail(response: Any) -> str:
     excerpt = str(response.text or "").strip()[:1000]
     return f": {excerpt}" if excerpt else ""
@@ -3450,15 +3326,33 @@ def custom_gpt_status(payload: Any) -> str:
         if value:
             return value
     return ""
+def extract_custom_gpt_detail_message(payload: Any) -> Optional[str]:
+    if not isinstance(payload, dict):
+        return None
+    conversation = payload.get("conversation")
+    if not isinstance(conversation, dict):
+        return None
+    messages = conversation.get("messages")
+    if not isinstance(messages, list):
+        return None
+    for message in reversed(messages):
+        if not isinstance(message, dict):
+            continue
+        if norm(message.get("role")) != "assistant":
+            continue
+        content = custom_gpt_text_content(message.get("content"))
+        if content:
+            return content
+    return None
 def call_medtronic_custom_gpt(
     api_token: str,
     gpt_id: str,
     user_prompt: str,
 ) -> str:
-    """Create one text-only CustomGPT conversation and return its reply."""
-    global _successful_custom_gpt_payload_style
     if requests is None:
-        raise RuntimeError("requests is not installed. Install requirements.txt first.")
+        raise RuntimeError(
+            "requests is not installed. Install requirements.txt first."
+        )
     token = api_token.strip()
     if token.lower().startswith("bearer "):
         token = token[7:].strip()
@@ -3467,53 +3361,59 @@ def call_medtronic_custom_gpt(
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
+        "Accept": "application/json",
     }
-    conversation_url = MEDTRONIC_CUSTOM_GPT_CONVERSATION_URL_TEMPLATE.format(
-        gpt_id=gpt_id,
+    conversation_url = (
+        MEDTRONIC_CUSTOM_GPT_CONVERSATION_URL_TEMPLATE.format(
+            gpt_id=gpt_id,
+        )
     )
-    response = None
-    attempted_styles: List[str] = []
-    request_payloads = custom_gpt_request_payloads(user_prompt)
-    for index, (style, request_payload) in enumerate(request_payloads):
-        attempted_styles.append(style)
-        response = requests.post(
-            conversation_url,
-            headers=headers,
-            json=request_payload,
-            timeout=120,
-        )
-        if response.ok:
-            _successful_custom_gpt_payload_style = style
-            break
-        can_retry_schema = (
-            response.status_code in CUSTOM_GPT_SCHEMA_RETRY_STATUSES
-            and index < len(request_payloads) - 1
-        )
-        if not can_retry_schema:
-            raise RuntimeError(
-                "CustomGPT returned HTTP "
-                f"{response.status_code}{custom_gpt_failure_detail(response)}"
-            )
-    if response is None or not response.ok:
+    request_payload = {
+        "message": user_prompt,
+        "originalUserQuery": user_prompt,
+        "sharingEnabled": False,
+        "stream": False,
+    }
+    response = requests.post(
+        conversation_url,
+        headers=headers,
+        json=request_payload,
+        timeout=120,
+    )
+    if not response.ok:
         raise RuntimeError(
-            "CustomGPT rejected all supported request payloads: "
-            + ", ".join(attempted_styles)
+            "CustomGPT returned HTTP "
+            f"{response.status_code}"
+            f"{custom_gpt_failure_detail(response)}"
         )
-    payload = decode_custom_gpt_http_response(response)
-    content = extract_custom_gpt_response_content(payload)
-    if content:
-        return content
-    conversation_id = extract_custom_gpt_conversation_id(payload)
+    try:
+        response_payload = response.json()
+    except ValueError as exc:
+        raise RuntimeError(
+            "CustomGPT returned invalid JSON even though stream=false."
+        ) from exc
+    if not isinstance(response_payload, dict):
+        raise RuntimeError(
+            "CustomGPT returned an unexpected response structure."
+        )
+    assistant_message = response_payload.get("message")
+    if isinstance(assistant_message, str) and assistant_message.strip():
+        return assistant_message.strip()
+    conversation_id = response_payload.get("conversationId")
+    if not conversation_id:
+        conversation = response_payload.get("conversation")
+        if isinstance(conversation, dict):
+            conversation_id = conversation.get("_id")
     if not conversation_id:
         raise RuntimeError(
-            "CustomGPT created a conversation but returned neither an assistant "
-            "response nor a conversation ID."
+            "CustomGPT returned neither a message nor a conversationId. "
+            f"Response fields: {sorted(response_payload)}"
         )
-    conversation_detail_url = f"{conversation_url}/{conversation_id}"
+    detail_url = f"{conversation_url}/{conversation_id}"
     deadline = time.monotonic() + CUSTOM_GPT_POLL_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
         detail_response = requests.get(
-            conversation_detail_url,
+            detail_url,
             headers=headers,
             timeout=120,
         )
@@ -3523,15 +3423,17 @@ def call_medtronic_custom_gpt(
                 f"{detail_response.status_code}"
                 f"{custom_gpt_failure_detail(detail_response)}"
             )
-        detail_payload = decode_custom_gpt_http_response(detail_response)
-        content = extract_custom_gpt_response_content(detail_payload)
-        if content:
-            return content
-        status = custom_gpt_status(detail_payload)
-        if status in {"cancelled", "canceled", "error", "failed", "expired"}:
+        try:
+            detail_payload = detail_response.json()
+        except ValueError as exc:
             raise RuntimeError(
-                f"CustomGPT conversation ended with status '{status}'."
-            )
+                "CustomGPT conversation lookup returned invalid JSON."
+            ) from exc
+        assistant_message = extract_custom_gpt_detail_message(
+            detail_payload
+        )
+        if assistant_message:
+            return assistant_message
         time.sleep(CUSTOM_GPT_POLL_INTERVAL_SECONDS)
     raise RuntimeError("Timed out waiting for the CustomGPT response.")
 def custom_gpt_code_prompt(source_text: str) -> str:
@@ -4004,7 +3906,7 @@ custom_code_team_context = (
 )
 custom_code_fingerprint = hashlib.sha256(
     (
-        "text-only-custom-code-fallback-v1\n"
+        "text-only-custom-code-fallback-v2-nonstreaming\n"
         f"{custom_code_team_context}\n"
         f"{medtronic_source}\n"
         + json.dumps(custom_code_gpt_ids, sort_keys=True)
