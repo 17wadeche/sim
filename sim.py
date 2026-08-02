@@ -4316,6 +4316,16 @@ custom_code_empty_results = [
     for attribute in custom_code_attributes_missing_from_xml
     if attribute in custom_code_results and not custom_code_results[attribute]
 ]
+if summary["Code groups"]:
+    for code_group in summary["Code groups"]:
+        st.markdown(f"**{code_group['label']}:** {', '.join(code_group['values'])}")
+else:
+    st.markdown("**Codes:** None found")
+for attribute, error in custom_code_errors.items():
+    st.warning(
+        f"Unable to generate the {CUSTOM_GPT_CODE_LABELS[attribute]} code "
+        f"with CustomGPT: {error}"
+    )
 reportability_col, rd_close_col = st.columns(2)
 with reportability_col:
     st.markdown(
@@ -4410,16 +4420,6 @@ if rfr_product_assignments:
         )
 else:
     st.write("No XML-derived RFR codes found")
-if summary["Code groups"]:
-    for code_group in summary["Code groups"]:
-        st.markdown(f"**{code_group['label']}:** {', '.join(code_group['values'])}")
-else:
-    st.markdown("**Codes:** None found")
-for attribute, error in custom_code_errors.items():
-    st.warning(
-        f"Unable to generate the {CUSTOM_GPT_CODE_LABELS[attribute]} code "
-        f"with CustomGPT: {error}"
-    )
 code_rows: List[Dict[str, str]] = []
 decision_rows: List[Dict[str, str]] = []
 for attribute, values in summary["All outputs"].items():
