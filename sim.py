@@ -3687,23 +3687,18 @@ def custom_gpt_id_for_code(attribute: str, team: str) -> str:
         return CUSTOM_GPT_CODE_IDS[attribute]
     except KeyError as exc:
         raise ValueError(f"Unsupported CustomGPT code attribute: {attribute}") from exc
-
-
 def generate_custom_gpt_codes(
     api_token: str,
     attribute: str,
     team: str,
     source_text: str,
 ) -> List[str]:
-    code_label = CUSTOM_GPT_CODE_LABELS[attribute]
     response_text = call_medtronic_custom_gpt(
         api_token,
         custom_gpt_id_for_code(attribute, team),
-        custom_gpt_code_prompt(code_label, source_text),
+        custom_gpt_code_prompt(source_text),
     )
     return parse_custom_gpt_codes(response_text)
-
-
 def call_medtronic_gpt(
     api_token: str,
     system_prompt: Optional[str],
