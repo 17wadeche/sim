@@ -1985,8 +1985,6 @@ def apply_rfr_to_reportability_mapping(
         attribute: list(values)
         for attribute, values in outputs.items()
     }
-    # Reportability is now derived exclusively from RFR, so discard any
-    # legacy XML-level MDR value before applying the authoritative mapping.
     mapped_outputs.pop("mdr", None)
     for result in map_rfr_reportability(
         mapped_outputs.get("rfrCodes", []),
@@ -2034,8 +2032,6 @@ def append_unique_code(
     }
     if code.upper() not in normalized_values:
         values.append(code.upper())
-
-
 def order_decision_outputs(
     outputs: Dict[str, List[str]],
 ) -> Dict[str, List[str]]:
@@ -2046,8 +2042,6 @@ def order_decision_outputs(
     for attribute in sorted(set(outputs) - set(ordered)):
         ordered[attribute] = outputs[attribute]
     return ordered
-
-
 def apply_derived_code_rules(
     outputs: Dict[str, List[str]],
     product_analysis_value: str,
@@ -3457,8 +3451,6 @@ def parse_json_from_custom_gpt_text(response_text: str) -> Any:
         except (TypeError, ValueError):
             continue
     return None
-
-
 def normalize_custom_gpt_code(value: Any) -> Optional[str]:
     raw_value = str(value or "").strip().strip("`'\"")
     raw_value = raw_value.rstrip(".,;:")
@@ -3468,8 +3460,6 @@ def normalize_custom_gpt_code(value: Any) -> Optional[str]:
     if code in CUSTOM_GPT_NON_CODE_TOKENS:
         return None
     return code
-
-
 def code_tokens_from_custom_gpt_value(value: Any) -> List[str]:
     if isinstance(value, list):
         candidates: List[str] = []
@@ -3509,8 +3499,6 @@ def code_tokens_from_custom_gpt_value(value: Any) -> List[str]:
         for token in CUSTOM_GPT_CODE_TOKEN_RE.findall(raw_value)
         if (code := normalize_custom_gpt_code(token))
     ]
-
-
 def parse_custom_gpt_codes(response_text: str) -> List[str]:
     structured = parse_json_from_custom_gpt_text(response_text)
     structured_has_code_field = False
@@ -3564,8 +3552,6 @@ def parse_custom_gpt_codes(response_text: str) -> List[str]:
     raise RuntimeError(
         "CustomGPT returned a response, but no code value could be parsed from it."
     )
-
-
 def custom_gpt_id_for_code(attribute: str, team: str) -> str:
     if attribute == "hazCodes":
         try:
@@ -4258,18 +4244,6 @@ custom_code_empty_results = [
     for attribute in custom_code_attributes_missing_from_xml
     if attribute in custom_code_results and not custom_code_results[attribute]
 ]
-if custom_code_successes:
-    st.caption(
-        "Text-only CustomGPT fallback used for: "
-        + ", ".join(custom_code_successes)
-        + "."
-    )
-if custom_code_empty_results:
-    st.info(
-        "The text-only CustomGPT returned no applicable code for: "
-        + ", ".join(custom_code_empty_results)
-        + "."
-    )
 for attribute, error in custom_code_errors.items():
     st.warning(
         f"Unable to generate the {CUSTOM_GPT_CODE_LABELS[attribute]} code "
