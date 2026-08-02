@@ -1027,6 +1027,21 @@ BRIEF_DESCRIPTION_PROMPT = (
     "Event Description: {{PUT IN THE EVENT DESCRIPTION}} "
 )
 INVESTIGATION_SUMMARY_REASON = "Forseen in risk/Included in Monitoring"
+INVESTIGATION_SUMMARY_OPENING = (
+    "Medtronic conducted an investigation based upon all information received. "
+    "Medtronic was notified of the following reported condition - "
+)
+INVESTIGATION_SUMMARY_CLOSING = (
+    ". The product sample or additional supporting materials from the account "
+    "were not available for analysis. Based on the evidence available there was "
+    "not enough information to make any determination. Without the sample a "
+    "detailed investigation could not be performed, and definitive cause could "
+    "not be identified. The suspected or most likely cause of the event could not "
+    "be determined. A Device History Record (DHR) or Service History Record (SHR) "
+    "review is not required since there is no indication of a potential "
+    "manufacturing or servicing issue. Further action was not required because "
+    "the event had foreseen risk and is included in a data monitoring plan."
+)
 GFE_RETURN_STATUS_QUESTION = "What is the return status?"
 GFE_RETURN_STATUS_ANSWER = "Will be returned"
 RFR_FDD_MAPPING_FILENAME = "rfr_to_fdd.tsv"
@@ -1737,8 +1752,31 @@ def values_for_attribute(attribute: str, raw_value: str) -> List[str]:
         return [code.upper() for code in split_codes(raw_value)]
     value = str(raw_value or "").strip()
     return [value] if value else []
-def collect_decision_evidence(matches: List[Dict[str, Any]]) -> List[Dict[str, str]]:
-    evidence: List[Dict[str, str]] = []
+def complaint_decision_from_values(values: List[str]) -> Optional[str]:
+    cleaned_values = [
+        str(value).strip()
+        for value in values
+        if str(value).strip()
+    ]
+    normalized_values = [
+        yes_no_value(value)
+        for value in cleaned_values
+    ]
+    if "Yes" in normalized_values:
+        return "Yes"
+    if "No" in normalized_values:
+        return "No"
+    deduped_values: List[str] = []
+    seen = set()
+    for value in cleaned_values:
+        key = norm(value)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped_values.append(value)
+    return ", ".join(deduped_values) if deduped_values else None
+def collect_decision_evidence(matches: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    evidence: List[Dict[str, Any]] = []
     for match in matches:
         for attribute, raw_value in (match.get("decision_attributes") or {}).items():
             for value in values_for_attribute(attribute, raw_value):
@@ -1749,14 +1787,16 @@ def collect_decision_evidence(matches: List[Dict[str, Any]]) -> List[Dict[str, s
                         "attribute": display_attribute_name(attribute),
                         "value": value,
                         "raw_xml_value": str(raw_value),
+                        "matched_question": match.get("pdf_question", ""),
                         "matched_answer": match.get("pdf_answer", ""),
+                        "matched_page": match.get("pdf_page"),
                         "source_tree": match.get("source_tree", ""),
                         "source_version": match.get("source_version", ""),
                         "xml_path": match.get("path", ""),
                     }
                 )
     return evidence
-def aggregate_decision_outputs(evidence: List[Dict[str, str]]) -> Dict[str, List[str]]:
+def aggregate_decision_outputs(evidence: List[Dict[str, Any]]) -> Dict[str, List[str]]:
     buckets: Dict[str, List[str]] = defaultdict(list)
     seen: Dict[str, set] = defaultdict(set)
     for item in evidence:
@@ -1969,14 +2009,12 @@ def summarize(matches: List[Dict[str, Any]]) -> Dict[str, Any]:
     evidence = collect_decision_evidence(matches)
     outputs = aggregate_decision_outputs(evidence)
     complaint_values = outputs.get("complaint", [])
-    if any(norm(value) == "yes" for value in complaint_values):
-        complaint_decision = "Yes"
-    elif complaint_values:
-        complaint_decision = ", ".join(complaint_values)
-    else:
-        complaint_decision = "Not found"
+    complaint_decision = (
+        complaint_decision_from_values(complaint_values)
+        or "Not found"
+    )
     selected_reportability = select_most_severe_reportability(outputs.get("mdr", []))
-    selected_evidence: List[Dict[str, str]] = []
+    selected_evidence: List[Dict[str, Any]] = []
     selected_reportability_evidence_added = False
     for item in evidence:
         if item["xml_attribute"] != "mdr":
@@ -2023,7 +2061,9 @@ def finalize_summary_outputs(
                 "attribute": "Reportability Decision",
                 "value": str(result["reportability"]),
                 "raw_xml_value": str(result["reportability"]),
+                "matched_question": "RFR-to-reportability mapping",
                 "matched_answer": f"RFR code {result['rfr_code']}",
+                "matched_page": None,
                 "source_tree": "RFR reportability mapping",
                 "source_version": "",
                 "xml_path": str(result["rfr_code"]),
@@ -2413,6 +2453,169 @@ def parse_products_involved_response(
             }
         )
     return products
+def match_products_to_complaint_decisions(
+    products: List[Dict[str, Any]],
+    matches: List[Dict[str, Any]],
+    overall_complaint_decision: str,
+) -> List[Dict[str, Any]]:
+    complaint_candidates: List[Dict[str, Any]] = []
+    for match in matches:
+        raw_complaint = (match.get("decision_attributes") or {}).get(
+            "complaint"
+        )
+        if raw_complaint is None:
+            continue
+        decision = complaint_decision_from_values(
+            values_for_attribute("complaint", raw_complaint)
+        )
+        if not decision:
+            continue
+        evidence_parts = [
+            match.get("pdf_question", ""),
+            match.get("pdf_answer", ""),
+            match.get("label", ""),
+            match.get("parent_question", ""),
+            match.get("question_path", ""),
+            match.get("path", ""),
+            match.get("source_tree", ""),
+        ]
+        complaint_candidates.append(
+            {
+                "decision": decision,
+                "page": match.get("pdf_page"),
+                "question": str(match.get("pdf_question", "")).strip(),
+                "answer": str(match.get("pdf_answer", "")).strip(),
+                "evidence": " ".join(
+                    str(part).strip()
+                    for part in evidence_parts
+                    if str(part).strip()
+                ),
+                "combined_score": float(match.get("combined_score") or 0.0),
+            }
+        )
+    token_stopwords = {
+        "and",
+        "code",
+        "device",
+        "id",
+        "model",
+        "name",
+        "number",
+        "product",
+        "the",
+        "type",
+    }
+    assignments: List[Dict[str, Any]] = []
+    for product in products:
+        product_value = str(product.get("value") or "").strip()
+        product_field = str(product.get("field") or "").strip()
+        product_page = product.get("page")
+        product_tokens = {
+            token
+            for token in tokens(product_value)
+            if len(token) >= 3 and token not in token_stopwords
+        }
+        scored_candidates: List[Dict[str, Any]] = []
+        for candidate in complaint_candidates:
+            evidence = candidate["evidence"]
+            evidence_tokens = tokens(evidence)
+            exact_product_reference = exact_or_phrase_match(
+                product_value,
+                evidence,
+            )
+            token_overlap = (
+                len(product_tokens & evidence_tokens) / len(product_tokens)
+                if product_tokens
+                else 0.0
+            )
+            same_page = (
+                product_page is not None
+                and candidate["page"] is not None
+                and product_page == candidate["page"]
+            )
+            field_similarity = max(
+                similarity(product_field, candidate["question"]),
+                similarity(product_field, evidence),
+            ) if product_field else 0.0
+            if not (
+                exact_product_reference
+                or token_overlap >= 0.50
+                or same_page
+                or field_similarity >= 0.80
+            ):
+                continue
+            match_score = (
+                (100.0 if exact_product_reference else 0.0)
+                + token_overlap * 40.0
+                + (25.0 if same_page else 0.0)
+                + field_similarity * 15.0
+                + candidate["combined_score"]
+            )
+            scored_candidates.append(
+                {
+                    **candidate,
+                    "match_score": match_score,
+                    "exact_product_reference": exact_product_reference,
+                    "token_overlap": token_overlap,
+                    "same_page": same_page,
+                    "field_similarity": field_similarity,
+                }
+            )
+        if scored_candidates:
+            best_score = max(
+                candidate["match_score"]
+                for candidate in scored_candidates
+            )
+            best_candidates = [
+                candidate
+                for candidate in scored_candidates
+                if abs(candidate["match_score"] - best_score) < 0.001
+            ]
+            complaint_decision = complaint_decision_from_values(
+                [candidate["decision"] for candidate in best_candidates]
+            ) or overall_complaint_decision
+            basis: List[str] = []
+            if any(
+                candidate["exact_product_reference"]
+                for candidate in best_candidates
+            ):
+                basis.append("product reference")
+            elif any(
+                candidate["token_overlap"] >= 0.50
+                for candidate in best_candidates
+            ):
+                basis.append("product terms")
+            if any(candidate["same_page"] for candidate in best_candidates):
+                basis.append("same page")
+            if any(
+                candidate["field_similarity"] >= 0.80
+                for candidate in best_candidates
+            ):
+                basis.append("source field")
+            match_basis = ", ".join(basis) or "related XML evidence"
+            matched_answers = list(
+                dict.fromkeys(
+                    candidate["answer"]
+                    for candidate in best_candidates
+                    if candidate["answer"]
+                )
+            )
+            matched_answer = " | ".join(matched_answers)
+        else:
+            complaint_decision = overall_complaint_decision or "Not found"
+            match_basis = "overall decision; no product-specific match"
+            matched_answer = ""
+        assignments.append(
+            {
+                "product": product_value,
+                "complaint_decision": complaint_decision,
+                "match_basis": match_basis,
+                "matched_answer": matched_answer,
+                "source_field": product_field,
+                "page": product_page,
+            }
+        )
+    return assignments
 def find_mxpr_answer(
     qa_pairs: List[QAPair],
     question_aliases: List[str],
@@ -2536,10 +2739,7 @@ def investigation_summary_exclusion_reasons(
     ):
         reasons.append("reason for no further action is not eligible")
     return reasons
-def build_investigation_summary(
-    event_description: str,
-    root_cause: str,
-) -> str:
+def investigation_event_condition(event_description: str) -> str:
     description = re.sub(
         r"\s+",
         " ",
@@ -2547,15 +2747,32 @@ def build_investigation_summary(
     )
     if not description:
         raise ValueError("An event description is required.")
-    if description[-1] not in ".!?":
-        description += "."
+    description = re.sub(
+        r"^[\"'“”‘’]*\s*it\s+was\s+reported\s+that\b[\s,:;\-–—]*",
+        "",
+        description,
+        count=1,
+        flags=re.IGNORECASE,
+    ).strip()
+    sentences = [
+        sentence.strip()
+        for sentence in re.split(r"(?<=[.!?])\s+(?=\S)", description)
+        if sentence.strip()
+    ]
+    if len(sentences) > 1:
+        description = " ".join(sentences[:-1])
+    description = description.rstrip(" \t\r\n.!?\"'”’")
+    if not description:
+        raise ValueError(
+            "The event description did not contain a reported condition after "
+            "the required text was removed."
+        )
+    return description
+def build_investigation_summary(event_description: str) -> str:
+    condition = investigation_event_condition(event_description)
     return (
-        f"{description} No product or clinical data was received for evaluation. "
-        "It was determined that the most likely cause of the event is related to "
-        f"{root_cause}. This event was foreseen in risk management and is included "
-        "in monitoring, therefore no further investigation was required. There was "
-        "no indication that the event was related to a possible manufacturing issue, "
-        "therefore no Device History Record review was performed."
+        f"{INVESTIGATION_SUMMARY_OPENING}{condition}"
+        f"{INVESTIGATION_SUMMARY_CLOSING}"
     )
 def business_rule_fallbacks(
     complaint_value: Any,
@@ -3079,6 +3296,11 @@ summary = finalize_summary_outputs(
     summary["All outputs"],
     rfr_reportability,
 )
+product_complaint_decisions = match_products_to_complaint_decisions(
+    products_involved,
+    matches,
+    summary["Complaint?"],
+)
 gfe_payload = build_gfe_payload(
     medtronic_source,
     rfr_reportability,
@@ -3174,6 +3396,13 @@ business_rule_outputs = resolve_business_rule_outputs(
 )
 investigation_summary: Optional[str] = None
 investigation_summary_error: Optional[str] = None
+if yes_no_value(product_analysis_value) == "No":
+    try:
+        investigation_summary = build_investigation_summary(
+            event_description or ""
+        )
+    except Exception as exc:
+        investigation_summary_error = str(exc)
 review_banner = review_banner_label(
     gfe_value,
     summary["Reportability Decision"],
@@ -3183,6 +3412,7 @@ if review_banner == "Review Needed":
     review_banner_placeholder.warning(review_banner)
 else:
     review_banner_placeholder.success(review_banner)
+
 st.subheader("Result Summary")
 st.markdown(f"**Complaint?** {summary['Complaint?']}")
 st.markdown("**Brief Description:**")
@@ -3195,9 +3425,23 @@ if event_description:
     st.write(event_description)
 elif event_description_error:
     st.error(f"Unable to generate the event description: {event_description_error}")
-st.markdown("**Products involved:**")
-if products_involved:
-    st.write([product["value"] for product in products_involved])
+st.markdown("**Products involved / Complaint decisions:**")
+if product_complaint_decisions:
+    product_decision_df = pd.DataFrame(
+        [
+            {
+                "Product": assignment["product"],
+                "Complaint decision": assignment["complaint_decision"],
+                "Match basis": assignment["match_basis"],
+            }
+            for assignment in product_complaint_decisions
+        ]
+    )
+    st.dataframe(
+        product_decision_df,
+        use_container_width=True,
+        hide_index=True,
+    )
 elif product_extraction_error:
     st.error(
         "Unable to extract products with GPT-4.1: "
@@ -3239,11 +3483,11 @@ for attribute, label in BUSINESS_RULE_LABELS.items():
 if investigation_summary:
     st.markdown("**Investigation Summary:**")
     st.write(investigation_summary)
-    if investigation_summary_error:
-        st.warning(
-            "The approved root cause could not be selected automatically, "
-            "so this case was routed to Non-Routine Investigation."
-        )
+elif investigation_summary_error:
+    st.error(
+        "Unable to build the investigation summary: "
+        f"{investigation_summary_error}"
+    )
 code_rows: List[Dict[str, str]] = []
 decision_rows: List[Dict[str, str]] = []
 for attribute, values in summary["All outputs"].items():
@@ -3270,6 +3514,17 @@ all_output_rows = (
             "Value": product["value"],
         }
         for product in products_involved
+    ]
+    + [
+        {
+            "Output": "Product complaint decision",
+            "Value": (
+                f"{assignment['product']} | "
+                f"{assignment['complaint_decision']} | "
+                f"{assignment['match_basis']}"
+            ),
+        }
+        for assignment in product_complaint_decisions
     ]
     + [
         {
@@ -3353,7 +3608,9 @@ if summary["Decision evidence"]:
         "output_type",
         "attribute",
         "value",
+        "matched_question",
         "matched_answer",
+        "matched_page",
         "source_tree",
         "source_version",
         "raw_xml_value",
