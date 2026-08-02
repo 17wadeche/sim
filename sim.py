@@ -950,6 +950,45 @@ CUSTOM_GPT_CODE_LABELS = {
     "imgCodes": "IMG",
     "hazCodes": "HAZ",
 }
+CUSTOM_GPT_CODE_FIELD_LABELS = {
+    "imeCodes": ("Annex E Code", "IME Code"),
+    "imfCodes": ("Annex F Code", "IMF Code"),
+    "imgCodes": ("Annex G Code", "IMG Code"),
+    "hazCodes": ("HAZ Code",),
+}
+CUSTOM_GPT_CODE_JSON_KEYS = {
+    "imeCodes": {
+        "annexecode",
+        "annexecodes",
+        "ime",
+        "imecode",
+        "imecodes",
+    },
+    "imfCodes": {
+        "annexfcode",
+        "annexfcodes",
+        "imf",
+        "imfcode",
+        "imfcodes",
+    },
+    "imgCodes": {
+        "annexgcode",
+        "annexgcodes",
+        "img",
+        "imgcode",
+        "imgcodes",
+    },
+    "hazCodes": {"haz", "hazcode", "hazcodes"},
+}
+CUSTOM_GPT_GENERIC_CODE_JSON_KEYS = {"code", "codes"}
+CUSTOM_GPT_JSON_WRAPPER_KEYS = {
+    "answer",
+    "data",
+    "output",
+    "response",
+    "result",
+}
+CUSTOM_GPT_CODE_PROTOCOL_VERSION = "targeted-code-field-v3"
 CUSTOM_GPT_POLL_TIMEOUT_SECONDS = 120
 CUSTOM_GPT_POLL_INTERVAL_SECONDS = 1.0
 CUSTOM_GPT_CODE_TOKEN_RE = re.compile(
@@ -3430,7 +3469,7 @@ def call_medtronic_custom_gpt(
             return assistant_message
         time.sleep(CUSTOM_GPT_POLL_INTERVAL_SECONDS)
     raise RuntimeError("Timed out waiting for the CustomGPT response.")
-def custom_gpt_code_prompt(source_text: str) -> str:
+def custom_gpt_code_prompt(source_text: str, attribute: str) -> str:
     return (
         f"{source_text}\n"
     )
@@ -3460,6 +3499,8 @@ def normalize_custom_gpt_code(value: Any) -> Optional[str]:
     if code in CUSTOM_GPT_NON_CODE_TOKENS:
         return None
     return code
+def normalize_custom_gpt_json_key(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value).casefold())
 def code_tokens_from_custom_gpt_value(value: Any) -> List[str]:
     if isinstance(value, list):
         candidates: List[str] = []
@@ -3467,30 +3508,17 @@ def code_tokens_from_custom_gpt_value(value: Any) -> List[str]:
             candidates.extend(code_tokens_from_custom_gpt_value(item))
         return candidates
     if isinstance(value, dict):
-        candidates = []
-        for key, item in value.items():
-            normalized_key = re.sub(r"[^a-z0-9]+", "", str(key).casefold())
-            if normalized_key in {
-                "code",
-                "codes",
-                "ime",
-                "imecode",
-                "imecodes",
-                "imf",
-                "imfcode",
-                "imfcodes",
-                "img",
-                "imgcode",
-                "imgcodes",
-                "haz",
-                "hazcode",
-                "hazcodes",
-            }:
-                candidates.extend(code_tokens_from_custom_gpt_value(item))
-        return candidates
+        return []
     if not isinstance(value, (str, int, float)):
         return []
     raw_value = str(value).strip()
+    if re.search(
+        r"\b(?:none|no applicable codes?|not found|n/?a)\b",
+        raw_value,
+        flags=re.IGNORECASE,
+    ):
+        return []
+    raw_value = re.split(r"\s+[-–—]\s+", raw_value, maxsplit=1)[0].strip()
     direct_code = normalize_custom_gpt_code(raw_value)
     if direct_code:
         return [direct_code]
@@ -3499,50 +3527,131 @@ def code_tokens_from_custom_gpt_value(value: Any) -> List[str]:
         for token in CUSTOM_GPT_CODE_TOKEN_RE.findall(raw_value)
         if (code := normalize_custom_gpt_code(token))
     ]
-def parse_custom_gpt_codes(response_text: str) -> List[str]:
-    structured = parse_json_from_custom_gpt_text(response_text)
-    structured_has_code_field = False
-    if isinstance(structured, dict):
-        normalized_keys = {
-            re.sub(r"[^a-z0-9]+", "", str(key).casefold())
-            for key in structured
-        }
-        structured_has_code_field = bool(
-            normalized_keys
-            & {
-                "code",
-                "codes",
-                "ime",
-                "imecode",
-                "imecodes",
-                "imf",
-                "imfcode",
-                "imfcodes",
-                "img",
-                "imgcode",
-                "imgcodes",
-                "haz",
-                "hazcode",
-                "hazcodes",
-            }
-        )
-    elif isinstance(structured, list):
-        structured_has_code_field = True
-    candidates = (
-        code_tokens_from_custom_gpt_value(structured)
-        if structured is not None
-        else []
+def collect_structured_values_for_keys(
+    value: Any,
+    accepted_keys: set[str],
+) -> List[Any]:
+    matches: List[Any] = []
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if normalize_custom_gpt_json_key(key) in accepted_keys:
+                matches.append(item)
+            else:
+                matches.extend(
+                    collect_structured_values_for_keys(item, accepted_keys)
+                )
+    elif isinstance(value, list):
+        for item in value:
+            matches.extend(
+                collect_structured_values_for_keys(item, accepted_keys)
+            )
+    return matches
+def collect_generic_code_values_from_wrappers(
+    value: Any,
+    allow_generic_fields: bool = True,
+) -> List[Any]:
+    matches: List[Any] = []
+    if not isinstance(value, dict):
+        return matches
+    for key, item in value.items():
+        normalized_key = normalize_custom_gpt_json_key(key)
+        if allow_generic_fields and normalized_key in CUSTOM_GPT_GENERIC_CODE_JSON_KEYS:
+            matches.append(item)
+        elif normalized_key in CUSTOM_GPT_JSON_WRAPPER_KEYS:
+            matches.extend(
+                collect_generic_code_values_from_wrappers(
+                    item,
+                    allow_generic_fields=True,
+                )
+            )
+    return matches
+def structured_custom_gpt_code_values(
+    structured: Any,
+    attribute: str,
+) -> Tuple[List[Any], bool]:
+    try:
+        target_keys = CUSTOM_GPT_CODE_JSON_KEYS[attribute]
+    except KeyError as exc:
+        raise ValueError(
+            f"Unsupported CustomGPT code attribute: {attribute}"
+        ) from exc
+    target_values = collect_structured_values_for_keys(
+        structured,
+        target_keys,
     )
-    if not candidates and not structured_has_code_field:
-        candidates = code_tokens_from_custom_gpt_value(response_text)
+    if target_values:
+        return target_values, True
+    generic_values = collect_generic_code_values_from_wrappers(structured)
+    if generic_values:
+        return generic_values, True
+    if isinstance(structured, list) and all(
+        not isinstance(item, (dict, list)) for item in structured
+    ):
+        return structured, True
+    return [], False
+def labeled_custom_gpt_code_values(
+    response_text: str,
+    attribute: str,
+) -> Tuple[List[str], bool]:
+    try:
+        labels = CUSTOM_GPT_CODE_FIELD_LABELS[attribute]
+    except KeyError as exc:
+        raise ValueError(
+            f"Unsupported CustomGPT code attribute: {attribute}"
+        ) from exc
+    candidates: List[str] = []
+    matched_field = False
+    for raw_line in str(response_text or "").splitlines():
+        line = re.sub(
+            r"^\s*(?:[-*•]\s+|\d+[.)]\s+)",
+            "",
+            raw_line,
+        ).strip()
+        line = line.replace("**", "").replace("__", "")
+        for label in labels:
+            match = re.match(
+                rf"^{re.escape(label)}\s*:\s*(.*?)\s*$",
+                line,
+                flags=re.IGNORECASE,
+            )
+            if not match:
+                continue
+            matched_field = True
+            candidates.extend(
+                code_tokens_from_custom_gpt_value(match.group(1))
+            )
+            break
+    return candidates, matched_field
+def dedupe_custom_gpt_codes(candidates: List[str]) -> List[str]:
     deduped: List[str] = []
     seen = set()
     for code in candidates:
         if code not in seen:
             seen.add(code)
             deduped.append(code)
-    if deduped or structured_has_code_field:
-        return deduped
+    return deduped
+def parse_custom_gpt_codes(
+    response_text: str,
+    attribute: str,
+) -> List[str]:
+    structured = parse_json_from_custom_gpt_text(response_text)
+    structured_values: List[Any] = []
+    structured_has_code_field = False
+    if structured is not None:
+        structured_values, structured_has_code_field = (
+            structured_custom_gpt_code_values(structured, attribute)
+        )
+    if structured_has_code_field:
+        candidates: List[str] = []
+        for value in structured_values:
+            candidates.extend(code_tokens_from_custom_gpt_value(value))
+        return dedupe_custom_gpt_codes(candidates)
+    labeled_candidates, labeled_field_found = labeled_custom_gpt_code_values(
+        response_text,
+        attribute,
+    )
+    if labeled_field_found:
+        return dedupe_custom_gpt_codes(labeled_candidates)
     if re.search(
         r"\b(?:none|no applicable codes?|no codes? applies?|not found|n/?a)\b",
         str(response_text or ""),
@@ -3550,7 +3659,8 @@ def parse_custom_gpt_codes(response_text: str) -> List[str]:
     ):
         return []
     raise RuntimeError(
-        "CustomGPT returned a response, but no code value could be parsed from it."
+        "CustomGPT returned a response, but the requested code field "
+        f"({CUSTOM_GPT_CODE_FIELD_LABELS[attribute][0]}) was not found."
     )
 def custom_gpt_id_for_code(attribute: str, team: str) -> str:
     if attribute == "hazCodes":
@@ -3571,9 +3681,9 @@ def generate_custom_gpt_codes(
     response_text = call_medtronic_custom_gpt(
         api_token,
         custom_gpt_id_for_code(attribute, team),
-        custom_gpt_code_prompt(source_text),
+        custom_gpt_code_prompt(source_text, attribute),
     )
-    return parse_custom_gpt_codes(response_text)
+    return parse_custom_gpt_codes(response_text, attribute)
 def call_medtronic_gpt(
     api_token: str,
     system_prompt: Optional[str],
@@ -3892,7 +4002,7 @@ custom_code_team_context = (
 )
 custom_code_fingerprint = hashlib.sha256(
     (
-        "text-only-custom-code-fallback-v2-nonstreaming\n"
+        f"{CUSTOM_GPT_CODE_PROTOCOL_VERSION}\n"
         f"{custom_code_team_context}\n"
         f"{medtronic_source}\n"
         + json.dumps(custom_code_gpt_ids, sort_keys=True)
