@@ -3186,19 +3186,6 @@ def process_pdf(
     return final_pairs, diagnostics, source_text, source_pages
 def build_medtronic_source(source_text: str, qa_pairs: List[QAPair]) -> str:
     sections: List[str] = []
-    if qa_pairs:
-        qa_blocks: List[str] = []
-        for pair in qa_pairs:
-            page_label = f" | Page: {pair.page}" if pair.page is not None else ""
-            qa_blocks.append(
-                f"Question: {pair.question}\n"
-                f"Answer: {pair.answer}\n"
-                f"Extraction source: {pair.source}{page_label}"
-            )
-        sections.append(
-            "EXTRACTED FORM FIELDS AND QUESTION/ANSWER PAIRS\n\n"
-            + "\n\n".join(qa_blocks)
-        )
     if source_text and source_text.strip():
         sections.append("EXTRACTED PDF TEXT\n\n" + source_text.strip())
     if not sections:
