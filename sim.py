@@ -70,6 +70,18 @@ PREFERRED_DECISION_ATTRIBUTES = [
     "deviceType",
     "productCategory",
 ]
+PREFERRED_CODE_DISPLAY_ORDER = [
+    "rfrCodes",
+    "fddCodes",
+    "fdmCodes",
+    "fdrCodes",
+    "fdcCodes",
+    "imeCodes",
+    "imfCodes",
+    "imgCodes",
+    "afcCodes",
+    "hazCodes",
+]
 STRUCTURAL_XML_ATTRIBUTES = {
     "label",
     "gchlabel",
@@ -1831,6 +1843,7 @@ def display_attribute_name(attribute: str) -> str:
         "imeCodes": "IME codes",
         "imfCodes": "IMF codes",
         "imgCodes": "IMG codes",
+        "afcCodes": "AFC codes",
         "hazCodes": "HAZ codes",
         "fdcCodes": "FDC codes",
         "fddCodes": "FDD codes",
@@ -2050,13 +2063,27 @@ def apply_rfr_to_fdd_mapping(
 def code_groups_from_outputs(
     outputs: Dict[str, List[str]],
 ) -> List[Dict[str, Any]]:
+    code_attributes = [
+        attribute
+        for attribute, values in outputs.items()
+        if attribute.lower().endswith("codes") and values
+    ]
+    ordered_attributes = [
+        attribute
+        for attribute in PREFERRED_CODE_DISPLAY_ORDER
+        if attribute in code_attributes
+    ]
+    ordered_attributes.extend(
+        attribute
+        for attribute in code_attributes
+        if attribute not in PREFERRED_CODE_DISPLAY_ORDER
+    )
     return [
         {
             "label": display_attribute_name(attribute),
-            "values": values,
+            "values": outputs[attribute],
         }
-        for attribute, values in outputs.items()
-        if attribute.lower().endswith("codes") and values
+        for attribute in ordered_attributes
     ]
 def append_unique_code(
     outputs: Dict[str, List[str]],
@@ -4279,6 +4306,50 @@ if event_description:
     st.write(event_description)
 elif event_description_error:
     st.error(f"Unable to generate the event description: {event_description_error}")
+custom_code_successes = [
+    CUSTOM_GPT_CODE_LABELS[attribute]
+    for attribute in custom_code_attributes_missing_from_xml
+    if custom_code_results.get(attribute)
+]
+custom_code_empty_results = [
+    CUSTOM_GPT_CODE_LABELS[attribute]
+    for attribute in custom_code_attributes_missing_from_xml
+    if attribute in custom_code_results and not custom_code_results[attribute]
+]
+reportability_col, rd_close_col = st.columns(2)
+with reportability_col:
+    st.markdown(
+        f"**Reportability Decision:** "
+        f"{summary['Reportability Decision'] or 'None found'}"
+    )
+    if unmapped_rfr_codes:
+        st.warning(
+            "No reportability mapping was supplied for RFR code(s): "
+            + ", ".join(unmapped_rfr_codes)
+        )
+    st.markdown(
+        f"**Product Analysis needed?:** {product_analysis_value}"
+    )
+    if gfe_value:
+        st.markdown(f"**GFE:** {gfe_value}")
+        if gfe_value == "Yes" and gfe_reason:
+            st.markdown(f"**GFE Reason:** {gfe_reason}")
+    elif gfe_error:
+        st.error(f"Unable to evaluate GFE: {gfe_error}")
+    st.markdown(f"**Analysis Letter:** {analysis_letter}")
+for attribute, label in BUSINESS_RULE_LABELS.items():
+    label_suffix = "" if label.endswith("?") else ":"
+    st.markdown(
+        f"**{label}{label_suffix}** {business_rule_outputs[attribute]}"
+    )
+if investigation_summary:
+    st.markdown("**Investigation Summary:**")
+    st.write(investigation_summary)
+elif investigation_summary_error:
+    st.error(
+        "Unable to build the investigation summary: "
+        f"{investigation_summary_error}"
+    )
 st.markdown("**Products involved / Product-level decisions and codes:**")
 if product_complaint_decisions:
     product_decision_df = pd.DataFrame(
@@ -4344,54 +4415,10 @@ if summary["Code groups"]:
         st.markdown(f"**{code_group['label']}:** {', '.join(code_group['values'])}")
 else:
     st.markdown("**Codes:** None found")
-custom_code_successes = [
-    CUSTOM_GPT_CODE_LABELS[attribute]
-    for attribute in custom_code_attributes_missing_from_xml
-    if custom_code_results.get(attribute)
-]
-custom_code_empty_results = [
-    CUSTOM_GPT_CODE_LABELS[attribute]
-    for attribute in custom_code_attributes_missing_from_xml
-    if attribute in custom_code_results and not custom_code_results[attribute]
-]
 for attribute, error in custom_code_errors.items():
     st.warning(
         f"Unable to generate the {CUSTOM_GPT_CODE_LABELS[attribute]} code "
         f"with CustomGPT: {error}"
-    )
-reportability_col, rd_close_col = st.columns(2)
-with reportability_col:
-    st.markdown(
-        f"**Reportability Decision:** "
-        f"{summary['Reportability Decision'] or 'None found'}"
-    )
-    if unmapped_rfr_codes:
-        st.warning(
-            "No reportability mapping was supplied for RFR code(s): "
-            + ", ".join(unmapped_rfr_codes)
-        )
-    st.markdown(
-        f"**Product Analysis needed?:** {product_analysis_value}"
-    )
-    if gfe_value:
-        st.markdown(f"**GFE:** {gfe_value}")
-        if gfe_value == "Yes" and gfe_reason:
-            st.markdown(f"**GFE Reason:** {gfe_reason}")
-    elif gfe_error:
-        st.error(f"Unable to evaluate GFE: {gfe_error}")
-    st.markdown(f"**Analysis Letter:** {analysis_letter}")
-for attribute, label in BUSINESS_RULE_LABELS.items():
-    label_suffix = "" if label.endswith("?") else ":"
-    st.markdown(
-        f"**{label}{label_suffix}** {business_rule_outputs[attribute]}"
-    )
-if investigation_summary:
-    st.markdown("**Investigation Summary:**")
-    st.write(investigation_summary)
-elif investigation_summary_error:
-    st.error(
-        "Unable to build the investigation summary: "
-        f"{investigation_summary_error}"
     )
 code_rows: List[Dict[str, str]] = []
 decision_rows: List[Dict[str, str]] = []
