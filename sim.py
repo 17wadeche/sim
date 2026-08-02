@@ -919,7 +919,7 @@ DEFAULT_QUESTION_THRESHOLD = 0.62
 DEFAULT_ANCESTOR_THRESHOLD = 0.50
 MAX_VALIDATED_MATCH_ROWS = 75
 MEDTRONIC_GPT_URL_TEMPLATE = (
-    "https://api.gpt.medtronic.com/providers/medtronicgpt/models/{model}"
+    "https://api.gpt-dev.medtronic.com/providers/medtronicgpt/models/{model}"
 )
 MEDTRONIC_CUSTOM_GPT_API_BASE = os.getenv(
     "MEDTRONIC_CUSTOM_GPT_API_BASE",
