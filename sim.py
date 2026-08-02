@@ -3183,7 +3183,6 @@ if review_banner == "Review Needed":
     review_banner_placeholder.warning(review_banner)
 else:
     review_banner_placeholder.success(review_banner)
-
 st.subheader("Result Summary")
 st.markdown(f"**Complaint?** {summary['Complaint?']}")
 st.markdown("**Brief Description:**")
