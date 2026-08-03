@@ -952,23 +952,34 @@ CUSTOM_GPT_CODE_IDS = {
     "imfCodes": "6a692f2103fb020cc58ab740",
     "imgCodes": "6a6b70c32d9a912f2f1ddd72",
 }
+RFR_CUSTOM_GPT_IDS = {
+    "North Haven": "6a710dbb833f3bc9c0bb9ac8",
+    "Boulder": "6a710b1c833f3bc9c0bb8f2b",
+}
 HAZ_CUSTOM_GPT_IDS = {
     "North Haven": "6a6ea2ce7f073ffaeb378ff1",
     "Boulder": "6a6ea0627f073ffaeb378d53",
 }
 CUSTOM_GPT_CODE_LABELS = {
+    "rfrCodes": "RFR",
     "imeCodes": "IME",
     "imfCodes": "IMF",
     "imgCodes": "IMG",
     "hazCodes": "HAZ",
 }
 CUSTOM_GPT_CODE_FIELD_LABELS = {
+    "rfrCodes": ("RFR Code", "RFR Codes", "RFR"),
     "imeCodes": ("Annex E Code", "IME Code"),
     "imfCodes": ("Annex F Code", "IMF Code"),
     "imgCodes": ("Annex G Code", "IMG Code"),
     "hazCodes": ("HAZ Code",),
 }
 CUSTOM_GPT_CODE_JSON_KEYS = {
+    "rfrCodes": {
+        "rfr",
+        "rfrcode",
+        "rfrcodes",
+    },
     "imeCodes": {
         "annexecode",
         "annexecodes",
@@ -1000,7 +1011,7 @@ CUSTOM_GPT_JSON_WRAPPER_KEYS = {
     "response",
     "result",
 }
-CUSTOM_GPT_CODE_PROTOCOL_VERSION = "targeted-code-field-v3"
+CUSTOM_GPT_CODE_PROTOCOL_VERSION = "targeted-code-field-v4-rfr-comparison"
 CUSTOM_GPT_POLL_TIMEOUT_SECONDS = 120
 CUSTOM_GPT_POLL_INTERVAL_SECONDS = 1.0
 CUSTOM_GPT_CODE_TOKEN_RE = re.compile(
@@ -3657,6 +3668,44 @@ def dedupe_custom_gpt_codes(candidates: List[str]) -> List[str]:
             seen.add(code)
             deduped.append(code)
     return deduped
+def compare_rfr_code_sources(
+    xml_codes: List[str],
+    custom_gpt_codes: List[str],
+) -> List[Dict[str, Any]]:
+    normalized_xml = dedupe_custom_gpt_codes(
+        [str(code).strip().upper() for code in xml_codes if str(code).strip()]
+    )
+    normalized_custom_gpt = dedupe_custom_gpt_codes(
+        [
+            str(code).strip().upper()
+            for code in custom_gpt_codes
+            if str(code).strip()
+        ]
+    )
+    xml_set = set(normalized_xml)
+    custom_gpt_set = set(normalized_custom_gpt)
+    ordered_codes = normalized_xml + [
+        code for code in normalized_custom_gpt if code not in xml_set
+    ]
+    comparison: List[Dict[str, Any]] = []
+    for code in ordered_codes:
+        in_xml = code in xml_set
+        in_custom_gpt = code in custom_gpt_set
+        comparison.append(
+            {
+                "rfr_code": code,
+                "xml_derived": in_xml,
+                "custom_gpt_derived": in_custom_gpt,
+                "comparison": (
+                    "Match"
+                    if in_xml and in_custom_gpt
+                    else "XML only"
+                    if in_xml
+                    else "CustomGPT only"
+                ),
+            }
+        )
+    return comparison
 def parse_custom_gpt_codes(
     response_text: str,
     attribute: str,
@@ -3690,6 +3739,11 @@ def parse_custom_gpt_codes(
         f"({CUSTOM_GPT_CODE_FIELD_LABELS[attribute][0]}) was not found."
     )
 def custom_gpt_id_for_code(attribute: str, team: str) -> str:
+    if attribute == "rfrCodes":
+        try:
+            return RFR_CUSTOM_GPT_IDS[team]
+        except KeyError as exc:
+            raise ValueError(f"Unsupported team selection: {team}") from exc
     if attribute == "hazCodes":
         try:
             return HAZ_CUSTOM_GPT_IDS[team]
@@ -3924,7 +3978,8 @@ with st.sidebar:
         options=list(HAZ_CUSTOM_GPT_IDS),
         index=0,
         help=(
-            "Selects the team-specific HAZ CustomGPT when HAZ codes are not "
+            "Selects the team-specific RFR CustomGPT used for comparison and "
+            "the team-specific HAZ CustomGPT used when HAZ codes are not "
             "provided by the XML."
         ),
     )
@@ -3971,6 +4026,7 @@ try:
         include_generic=DEFAULT_INCLUDE_GENERIC,
     )
     summary = summarize(matches)
+    xml_rfr_codes = list(summary["All outputs"].get("rfrCodes", []))
     rfr_to_fdd_mapping = load_rfr_to_fdd_mapping()
     rfr_to_reportability_mapping = load_rfr_to_reportability_mapping()
     medtronic_source = build_medtronic_source(source_text, qa_pairs)
@@ -4016,21 +4072,23 @@ product_request_id = (
 custom_code_attributes_missing_from_xml = [
     attribute
     for attribute in CUSTOM_GPT_CODE_LABELS
-    if not summary["All outputs"].get(attribute)
+    if (
+        attribute != "rfrCodes"
+        and not summary["All outputs"].get(attribute)
+    )
+]
+custom_code_attributes_to_generate = [
+    "rfrCodes",
+    *custom_code_attributes_missing_from_xml,
 ]
 custom_code_gpt_ids = {
     attribute: custom_gpt_id_for_code(attribute, team)
-    for attribute in custom_code_attributes_missing_from_xml
+    for attribute in custom_code_attributes_to_generate
 }
-custom_code_team_context = (
-    team
-    if "hazCodes" in custom_code_attributes_missing_from_xml
-    else "HAZ supplied by XML"
-)
 custom_code_fingerprint = hashlib.sha256(
     (
         f"{CUSTOM_GPT_CODE_PROTOCOL_VERSION}\n"
-        f"{custom_code_team_context}\n"
+        f"{team}\n"
         f"{medtronic_source}\n"
         + json.dumps(custom_code_gpt_ids, sort_keys=True)
     ).encode("utf-8")
@@ -4092,22 +4150,21 @@ summary["All outputs"] = apply_derived_code_rules(
     product_analysis_value,
     return_statuses,
 )
-if (
-    custom_code_attributes_missing_from_xml
-    and "medtronic_custom_code_results" not in st.session_state
-):
+if "medtronic_custom_code_results" not in st.session_state:
     custom_code_results: Dict[str, List[str]] = {}
     custom_code_errors: Dict[str, str] = {}
-    missing_labels = [
+    missing_code_labels = [
         CUSTOM_GPT_CODE_LABELS[attribute]
         for attribute in custom_code_attributes_missing_from_xml
     ]
-    with st.spinner(
-        "Generating missing "
-        + ", ".join(missing_labels)
-        + " codes with text-only CustomGPT requests..."
-    ):
-        for attribute in custom_code_attributes_missing_from_xml:
+    custom_code_spinner = f"Generating the {team} RFR comparison"
+    if missing_code_labels:
+        custom_code_spinner += (
+            " and missing " + ", ".join(missing_code_labels) + " codes"
+        )
+    custom_code_spinner += " with text-only CustomGPT requests..."
+    with st.spinner(custom_code_spinner):
+        for attribute in custom_code_attributes_to_generate:
             try:
                 codes = generate_custom_gpt_codes(
                     medtronic_api_token,
@@ -4122,6 +4179,12 @@ if (
     st.session_state["medtronic_custom_code_errors"] = custom_code_errors
 custom_code_results = st.session_state.get("medtronic_custom_code_results", {})
 custom_code_errors = st.session_state.get("medtronic_custom_code_errors", {})
+custom_gpt_rfr_codes = custom_code_results.get("rfrCodes", [])
+rfr_code_comparison = (
+    compare_rfr_code_sources(xml_rfr_codes, custom_gpt_rfr_codes)
+    if "rfrCodes" in custom_code_results
+    else []
+)
 for attribute in custom_code_attributes_missing_from_xml:
     if summary["All outputs"].get(attribute):
         continue
@@ -4306,22 +4369,52 @@ if event_description:
     st.write(event_description)
 elif event_description_error:
     st.error(f"Unable to generate the event description: {event_description_error}")
-custom_code_successes = [
-    CUSTOM_GPT_CODE_LABELS[attribute]
-    for attribute in custom_code_attributes_missing_from_xml
-    if custom_code_results.get(attribute)
-]
-custom_code_empty_results = [
-    CUSTOM_GPT_CODE_LABELS[attribute]
-    for attribute in custom_code_attributes_missing_from_xml
-    if attribute in custom_code_results and not custom_code_results[attribute]
-]
 if summary["Code groups"]:
     for code_group in summary["Code groups"]:
         st.markdown(f"**{code_group['label']}:** {', '.join(code_group['values'])}")
 else:
     st.markdown("**Codes:** None found")
+st.markdown(f"**RFR code comparison (XML vs {team} CustomGPT):**")
+if "rfrCodes" in custom_code_errors:
+    st.warning(
+        f"Unable to generate the {team} RFR codes with CustomGPT: "
+        f"{custom_code_errors['rfrCodes']}"
+    )
+elif "rfrCodes" in custom_code_results:
+    if rfr_code_comparison:
+        rfr_comparison_df = pd.DataFrame(
+            [
+                {
+                    "RFR code": item["rfr_code"],
+                    "XML-derived": "Yes" if item["xml_derived"] else "",
+                    f"{team} CustomGPT": (
+                        "Yes" if item["custom_gpt_derived"] else ""
+                    ),
+                    "Comparison": item["comparison"],
+                }
+                for item in rfr_code_comparison
+            ]
+        )
+        st.dataframe(
+            rfr_comparison_df,
+            use_container_width=True,
+            hide_index=True,
+        )
+        st.download_button(
+            "Download RFR comparison as CSV",
+            rfr_comparison_df.to_csv(index=False).encode("utf-8"),
+            "rfr_code_comparison.csv",
+            "text/csv",
+        )
+    else:
+        st.write("Neither source returned an RFR code.")
+    st.caption(
+        "CustomGPT RFR codes are shown for comparison only and are not merged "
+        "into the XML-derived operational outputs."
+    )
 for attribute, error in custom_code_errors.items():
+    if attribute == "rfrCodes":
+        continue
     st.warning(
         f"Unable to generate the {CUSTOM_GPT_CODE_LABELS[attribute]} code "
         f"with CustomGPT: {error}"
@@ -4430,6 +4523,13 @@ for attribute, values in summary["All outputs"].items():
         target.append({"Output": display_attribute_name(attribute), "Value": value})
 all_output_rows = (
     code_rows
+    + [
+        {
+            "Output": f"RFR comparison - {item['comparison']}",
+            "Value": item["rfr_code"],
+        }
+        for item in rfr_code_comparison
+    ]
     + (
         [
             {
