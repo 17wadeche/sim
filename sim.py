@@ -950,7 +950,6 @@ MEDTRONIC_GPT_MAX_COMPLETION_TOKENS = 2000
 CUSTOM_GPT_CODE_IDS = {
     "imeCodes": "6a691f1a03fb020cc58a9e8c",
     "imfCodes": "6a692f2103fb020cc58ab740",
-    "imgCodes": "6a6b70c32d9a912f2f1ddd72",
 }
 RFR_CUSTOM_GPT_IDS = {
     "North Haven": "6a710dbb833f3bc9c0bb9ac8",
@@ -964,7 +963,6 @@ CUSTOM_GPT_CODE_LABELS = {
     "rfrCodes": "RFR",
     "imeCodes": "IME",
     "imfCodes": "IMF",
-    "imgCodes": "IMG",
     "hazCodes": "HAZ",
 }
 CUSTOM_GPT_CODE_FIELD_LABELS = {
@@ -978,7 +976,6 @@ CUSTOM_GPT_CODE_FIELD_LABELS = {
     ),
     "imeCodes": ("Annex E Code", "IME Code"),
     "imfCodes": ("Annex F Code", "IMF Code"),
-    "imgCodes": ("Annex G Code", "IMG Code"),
     "hazCodes": ("HAZ Code",),
 }
 CUSTOM_GPT_CODE_JSON_KEYS = {
@@ -1002,13 +999,6 @@ CUSTOM_GPT_CODE_JSON_KEYS = {
         "imf",
         "imfcode",
         "imfcodes",
-    },
-    "imgCodes": {
-        "annexgcode",
-        "annexgcodes",
-        "img",
-        "imgcode",
-        "imgcodes",
     },
     "hazCodes": {"haz", "hazcode", "hazcodes"},
 }
@@ -2169,6 +2159,7 @@ def apply_derived_code_rules(
         "fdmCodes",
         "fdrCodes",
         "fdcCodes",
+        "imgCodes",
         "afcCodes",
     }
     if yes_no_value(product_analysis_value) == "Yes":
@@ -2183,6 +2174,7 @@ def apply_derived_code_rules(
         ]
         append_unique_code(derived_outputs, "fdrCodes", "C20")
         append_unique_code(derived_outputs, "fdcCodes", "D15")
+        append_unique_code(derived_outputs, "imgCodes", "G07001")
         append_unique_code(derived_outputs, "afcCodes", "SURNOSAMP1")
     ordered = {}
     for attribute in PREFERRED_DECISION_ATTRIBUTES:
