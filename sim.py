@@ -968,7 +968,14 @@ CUSTOM_GPT_CODE_LABELS = {
     "hazCodes": "HAZ",
 }
 CUSTOM_GPT_CODE_FIELD_LABELS = {
-    "rfrCodes": ("RFR Code", "RFR Codes", "RFR"),
+    "rfrCodes": (
+        "RFR Code/LLT",
+        "RFR Code / LLT",
+        "Code/LLT",
+        "RFR Code",
+        "RFR Codes",
+        "RFR",
+    ),
     "imeCodes": ("Annex E Code", "IME Code"),
     "imfCodes": ("Annex F Code", "IMF Code"),
     "imgCodes": ("Annex G Code", "IMG Code"),
@@ -978,7 +985,9 @@ CUSTOM_GPT_CODE_JSON_KEYS = {
     "rfrCodes": {
         "rfr",
         "rfrcode",
+        "rfrcodellt",
         "rfrcodes",
+        "codellt",
     },
     "imeCodes": {
         "annexecode",
@@ -1003,6 +1012,34 @@ CUSTOM_GPT_CODE_JSON_KEYS = {
     },
     "hazCodes": {"haz", "hazcode", "hazcodes"},
 }
+RFR_RECOMMENDATION_FIELD_KEYS = {
+    "productorsystem": "product",
+    "rfrcodellt": "rfrCodes",
+    "rfrcode": "rfrCodes",
+    "rfrcodes": "rfrCodes",
+    "codellt": "rfrCodes",
+    "fdccode": "fdcCodes",
+    "fdccodes": "fdcCodes",
+    "fdrcode": "fdrCodes",
+    "fdrcodes": "fdrCodes",
+    "fdmcode": "fdmCodes",
+    "fdmcodes": "fdmCodes",
+    "fddcode": "fddCodes",
+    "fddcodes": "fddCodes",
+    "complaint": "complaint",
+    "complaintdecision": "complaint",
+    "isthisacomplaint": "complaint",
+    "isthisproductorsystemexplicitlystatedinthetext": "explicitly_stated",
+    "exactdescription": "exact_description",
+    "rationale": "rationale",
+    "confidence": "confidence",
+}
+PRODUCT_REQUIRED_CODE_ATTRIBUTES = (
+    "fdcCodes",
+    "fdrCodes",
+    "fdmCodes",
+    "fddCodes",
+)
 CUSTOM_GPT_GENERIC_CODE_JSON_KEYS = {"code", "codes"}
 CUSTOM_GPT_JSON_WRAPPER_KEYS = {
     "answer",
@@ -1011,7 +1048,7 @@ CUSTOM_GPT_JSON_WRAPPER_KEYS = {
     "response",
     "result",
 }
-CUSTOM_GPT_CODE_PROTOCOL_VERSION = "targeted-code-field-v4-rfr-comparison"
+CUSTOM_GPT_CODE_PROTOCOL_VERSION = "rfr-product-recommendation-v5-xml-override"
 CUSTOM_GPT_POLL_TIMEOUT_SECONDS = 120
 CUSTOM_GPT_POLL_INTERVAL_SECONDS = 1.0
 CUSTOM_GPT_CODE_TOKEN_RE = re.compile(
@@ -2851,11 +2888,89 @@ def code_output_summary(
             f"{display_attribute_name(attribute)}: {', '.join(values)}"
         )
     return "; ".join(parts)
+def apply_product_required_code_fallbacks(
+    outputs: Dict[str, List[str]],
+    product_analysis_value: str,
+    return_statuses: set,
+) -> Dict[str, List[str]]:
+    resolved = {
+        attribute: list(values)
+        for attribute, values in outputs.items()
+    }
+    if yes_no_value(product_analysis_value) != "No":
+        return resolved
+    normalized_discarded = normalized_question_label(
+        "No return-customer discarded"
+    )
+    if not resolved.get("fdmCodes"):
+        resolved["fdmCodes"] = [
+            "B18" if normalized_discarded in return_statuses else "B17"
+        ]
+    if not resolved.get("fdrCodes"):
+        resolved["fdrCodes"] = ["C20"]
+    if not resolved.get("fdcCodes"):
+        resolved["fdcCodes"] = ["D15"]
+    return resolved
+def replace_output_values(
+    outputs: Dict[str, List[str]],
+    attribute: str,
+    values: List[str],
+) -> None:
+    normalized_values: List[str] = []
+    seen = set()
+    for raw_value in values:
+        value = str(raw_value).strip()
+        if not value:
+            continue
+        if attribute.lower().endswith("codes"):
+            value = value.upper()
+        key = norm(value)
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized_values.append(value)
+    if normalized_values:
+        outputs[attribute] = normalized_values
+    else:
+        outputs.pop(attribute, None)
+def merge_product_outputs_into_summary(
+    outputs: Dict[str, List[str]],
+    assignments: List[Dict[str, Any]],
+) -> Dict[str, List[str]]:
+    merged = {
+        attribute: list(values)
+        for attribute, values in outputs.items()
+    }
+    operational_attributes = {
+        "rfrCodes",
+        "mdr",
+        *PRODUCT_REQUIRED_CODE_ATTRIBUTES,
+    }
+    for assignment in assignments:
+        product_outputs = assignment.get("outputs") or {}
+        for attribute in operational_attributes:
+            for value in product_outputs.get(attribute, []):
+                values = merged.setdefault(attribute, [])
+                if norm(value) not in {norm(item) for item in values}:
+                    values.append(value)
+    return order_decision_outputs(merged)
+def product_output_display(
+    outputs: Dict[str, List[str]],
+    attribute: str,
+) -> str:
+    values = [
+        str(value).strip()
+        for value in outputs.get(attribute, [])
+        if str(value).strip()
+    ]
+    return ", ".join(values) if values else "Needs review"
 def match_products_to_xml_outputs(
     products: List[Dict[str, Any]],
     matches: List[Dict[str, Any]],
     rfr_to_fdd_mapping: Dict[str, List[str]],
     rfr_to_reportability_mapping: Dict[str, str],
+    product_analysis_value: str,
+    return_statuses: set,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     match_links: List[Dict[str, Any]] = []
     product_matches: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
@@ -2873,44 +2988,101 @@ def match_products_to_xml_outputs(
     assignments: List[Dict[str, Any]] = []
     for index, product in enumerate(products):
         matched_rows = product_matches.get(index, [])
-        product_outputs = aggregate_decision_outputs(
+        xml_outputs = aggregate_decision_outputs(
             collect_decision_evidence(matched_rows)
         )
-        product_outputs = apply_rfr_to_fdd_mapping(
-            product_outputs,
+        xml_rfr_codes = list(xml_outputs.get("rfrCodes", []))
+        final_outputs = {
+            attribute: list(values)
+            for attribute, values in (product.get("outputs") or {}).items()
+        }
+        final_outputs = apply_rfr_to_fdd_mapping(
+            final_outputs,
             rfr_to_fdd_mapping,
         )
-        product_outputs = apply_rfr_to_reportability_mapping(
-            product_outputs,
+        final_outputs = apply_rfr_to_reportability_mapping(
+            final_outputs,
             rfr_to_reportability_mapping,
         )
+        final_outputs = apply_product_required_code_fallbacks(
+            final_outputs,
+            product_analysis_value,
+            return_statuses,
+        )
+        rfr_source = str(product.get("source") or "RFR CustomGPT")
+        if xml_rfr_codes:
+            replace_output_values(final_outputs, "rfrCodes", xml_rfr_codes)
+            final_outputs.pop("fddCodes", None)
+            final_outputs.pop("mdr", None)
+            final_outputs = apply_rfr_to_fdd_mapping(
+                final_outputs,
+                rfr_to_fdd_mapping,
+            )
+            final_outputs = apply_rfr_to_reportability_mapping(
+                final_outputs,
+                rfr_to_reportability_mapping,
+            )
+            rfr_source = "Product-matched XML override"
+        mapped_xml_outputs = apply_rfr_to_fdd_mapping(
+            xml_outputs,
+            rfr_to_fdd_mapping,
+        )
+        mapped_xml_outputs = apply_rfr_to_reportability_mapping(
+            mapped_xml_outputs,
+            rfr_to_reportability_mapping,
+        )
+        for attribute in PRODUCT_REQUIRED_CODE_ATTRIBUTES:
+            xml_values = mapped_xml_outputs.get(attribute, [])
+            if xml_values:
+                replace_output_values(final_outputs, attribute, xml_values)
+        for attribute, xml_values in xml_outputs.items():
+            if (
+                attribute.lower().endswith("codes")
+                and attribute not in {"rfrCodes", *PRODUCT_REQUIRED_CODE_ATTRIBUTES}
+                and xml_values
+            ):
+                replace_output_values(final_outputs, attribute, xml_values)
+        final_outputs = order_decision_outputs(final_outputs)
         xml_complaint_decision = complaint_decision_from_values(
-            product_outputs.get("complaint", [])
+            xml_outputs.get("complaint", [])
         )
         normalized_xml_decision = yes_no_value(xml_complaint_decision)
-        explicit_role = normalize_product_role(product.get("role"))
+        ai_complaint_decision = yes_no_value(
+            product.get("complaint_decision")
+        )
         if normalized_xml_decision == "Yes":
             classification = "Complaint"
             complaint_decision = "Yes"
             classification_basis = "product-specific XML complaint=Yes"
+            complaint_source = "Product-matched XML override"
         elif normalized_xml_decision == "No":
             classification = "Not a complaint"
             complaint_decision = "No"
             classification_basis = "product-specific XML complaint=No"
-        elif explicit_role == "complaint":
+            complaint_source = "Product-matched XML override"
+        elif ai_complaint_decision == "Yes":
             classification = "Complaint"
             complaint_decision = "Yes"
-            classification_basis = "explicit source allegation"
-        elif explicit_role == "concomitant":
+            classification_basis = str(
+                product.get("complaint_basis")
+                or "RFR CustomGPT recommendation"
+            )
+            complaint_source = str(product.get("source") or "RFR CustomGPT")
+        elif ai_complaint_decision == "No":
             classification = "Concomitant / not a complaint"
             complaint_decision = "No"
-            classification_basis = "explicit concomitant source evidence"
+            classification_basis = str(
+                product.get("complaint_basis")
+                or "RFR CustomGPT recommendation"
+            )
+            complaint_source = str(product.get("source") or "RFR CustomGPT")
         else:
             classification = "Needs review"
             complaint_decision = "Needs review"
             classification_basis = (
-                "no product-specific XML complaint value or explicit product role"
+                "no product-specific XML or CustomGPT complaint decision"
             )
+            complaint_source = "Needs review"
         matched_answers = list(
             dict.fromkeys(
                 str(row.get("pdf_answer") or "").strip()
@@ -2919,73 +3091,90 @@ def match_products_to_xml_outputs(
             )
         )
         xml_match_basis = "; ".join(product_match_bases.get(index, []))
+        reportability = select_most_severe_reportability(
+            final_outputs.get("mdr", [])
+        )
+        required_fields_complete = bool(reportability) and all(
+            final_outputs.get(attribute)
+            for attribute in PRODUCT_REQUIRED_CODE_ATTRIBUTES
+        )
         assignments.append(
             {
                 "product": str(product.get("value") or "").strip(),
                 "classification": classification,
                 "complaint_decision": complaint_decision,
+                "complaint_source": complaint_source,
                 "classification_basis": classification_basis,
                 "match_basis": xml_match_basis or "no product-specific XML match",
                 "matched_answer": " | ".join(matched_answers),
                 "source_field": str(product.get("field") or "").strip(),
                 "page": product.get("page"),
                 "role_evidence": str(product.get("role_evidence") or "").strip(),
-                "outputs": product_outputs,
-                "rfr_codes": product_outputs.get("rfrCodes", []),
-                "other_codes": code_output_summary(product_outputs),
-                "reportability": select_most_severe_reportability(
-                    product_outputs.get("mdr", [])
-                ),
+                "outputs": final_outputs,
+                "rfr_codes": final_outputs.get("rfrCodes", []),
+                "rfr_source": rfr_source,
+                "fdc_codes": final_outputs.get("fdcCodes", []),
+                "fdr_codes": final_outputs.get("fdrCodes", []),
+                "fdm_codes": final_outputs.get("fdmCodes", []),
+                "fdd_codes": final_outputs.get("fddCodes", []),
+                "other_codes": code_output_summary(final_outputs),
+                "reportability": reportability,
+                "reportability_decision": reportability,
+                "required_fields_complete": required_fields_complete,
             }
         )
     rfr_assignments: List[Dict[str, Any]] = []
     seen_rfr_rows = set()
+    for assignment in assignments:
+        for raw_rfr_code in assignment["rfr_codes"]:
+            rfr_code = str(raw_rfr_code).strip().upper()
+            row_key = (rfr_code, assignment["product"], "Assigned")
+            if not rfr_code or row_key in seen_rfr_rows:
+                continue
+            seen_rfr_rows.add(row_key)
+            rfr_assignments.append(
+                {
+                    "rfr_code": rfr_code,
+                    "product": assignment["product"],
+                    "assignment_status": "Assigned",
+                    "reportability": assignment["reportability"],
+                    "other_codes": assignment["other_codes"],
+                    "match_basis": assignment["rfr_source"],
+                    "matched_answer": assignment["matched_answer"],
+                    "source_tree": assignment["rfr_source"],
+                    "xml_path": "",
+                }
+            )
     for link in match_links:
+        if link["product_index"] is not None:
+            continue
         match = link["match"]
         match_outputs = aggregate_decision_outputs(
             collect_decision_evidence([match])
         )
         for raw_rfr_code in match_outputs.get("rfrCodes", []):
             rfr_code = str(raw_rfr_code).strip().upper()
-            if not rfr_code:
+            row_key = (
+                rfr_code,
+                None,
+                str(match.get("path") or ""),
+            )
+            if not rfr_code or row_key in seen_rfr_rows:
                 continue
-            rfr_outputs = {
-                attribute: list(values)
-                for attribute, values in match_outputs.items()
-                if attribute != "rfrCodes"
-            }
-            rfr_outputs["rfrCodes"] = [rfr_code]
+            seen_rfr_rows.add(row_key)
             rfr_outputs = apply_rfr_to_fdd_mapping(
-                rfr_outputs,
+                {"rfrCodes": [rfr_code]},
                 rfr_to_fdd_mapping,
             )
             rfr_outputs = apply_rfr_to_reportability_mapping(
                 rfr_outputs,
                 rfr_to_reportability_mapping,
             )
-            product_index = link["product_index"]
-            product_value = (
-                assignments[product_index]["product"]
-                if product_index is not None
-                else None
-            )
-            row_key = (
-                rfr_code,
-                product_value,
-                str(match.get("source_tree") or ""),
-                str(match.get("path") or ""),
-                str(match.get("pdf_answer") or ""),
-            )
-            if row_key in seen_rfr_rows:
-                continue
-            seen_rfr_rows.add(row_key)
             rfr_assignments.append(
                 {
                     "rfr_code": rfr_code,
-                    "product": product_value,
-                    "assignment_status": (
-                        "Assigned" if product_value else "Unassigned"
-                    ),
+                    "product": None,
+                    "assignment_status": "Unassigned",
                     "reportability": select_most_severe_reportability(
                         rfr_outputs.get("mdr", [])
                     ),
@@ -3286,9 +3475,15 @@ def build_gfe_payload(
                 {
                     "product": assignment["product"],
                     "classification": assignment["classification"],
+                    "complaint_decision": assignment["complaint_decision"],
                     "rfr_codes": assignment["rfr_codes"],
-                    "other_codes": assignment["other_codes"],
-                    "reportability": assignment["reportability"],
+                    "reportability_decision": assignment[
+                        "reportability_decision"
+                    ],
+                    "fdc_codes": assignment["fdc_codes"],
+                    "fdr_codes": assignment["fdr_codes"],
+                    "fdm_codes": assignment["fdm_codes"],
+                    "fdd_codes": assignment["fdd_codes"],
                 }
                 for assignment in (product_xml_assignments or [])
             ],
@@ -3529,9 +3724,19 @@ def parse_json_from_custom_gpt_text(response_text: str) -> Any:
             continue
     return None
 def normalize_custom_gpt_code(value: Any) -> Optional[str]:
+    return normalize_custom_gpt_code_token(value, allow_alpha_only=False)
+def normalize_custom_gpt_code_token(
+    value: Any,
+    allow_alpha_only: bool = False,
+) -> Optional[str]:
     raw_value = str(value or "").strip().strip("`'\"")
     raw_value = raw_value.rstrip(".,;:")
-    if not CUSTOM_GPT_CODE_TOKEN_RE.fullmatch(raw_value):
+    token_re = (
+        re.compile(r"[A-Za-z][A-Za-z0-9._/-]{1,39}")
+        if allow_alpha_only
+        else CUSTOM_GPT_CODE_TOKEN_RE
+    )
+    if not token_re.fullmatch(raw_value):
         return None
     code = raw_value.upper()
     if code in CUSTOM_GPT_NON_CODE_TOKENS:
@@ -3539,11 +3744,19 @@ def normalize_custom_gpt_code(value: Any) -> Optional[str]:
     return code
 def normalize_custom_gpt_json_key(value: Any) -> str:
     return re.sub(r"[^a-z0-9]+", "", str(value).casefold())
-def code_tokens_from_custom_gpt_value(value: Any) -> List[str]:
+def code_tokens_from_custom_gpt_value(
+    value: Any,
+    allow_alpha_only: bool = False,
+) -> List[str]:
     if isinstance(value, list):
         candidates: List[str] = []
         for item in value:
-            candidates.extend(code_tokens_from_custom_gpt_value(item))
+            candidates.extend(
+                code_tokens_from_custom_gpt_value(
+                    item,
+                    allow_alpha_only=allow_alpha_only,
+                )
+            )
         return candidates
     if isinstance(value, dict):
         return []
@@ -3557,9 +3770,23 @@ def code_tokens_from_custom_gpt_value(value: Any) -> List[str]:
     ):
         return []
     raw_value = re.split(r"\s+[-–—]\s+", raw_value, maxsplit=1)[0].strip()
-    direct_code = normalize_custom_gpt_code(raw_value)
+    raw_value = re.split(r"\s+\(", raw_value, maxsplit=1)[0].strip()
+    direct_code = normalize_custom_gpt_code_token(
+        raw_value,
+        allow_alpha_only=allow_alpha_only,
+    )
     if direct_code:
         return [direct_code]
+    if allow_alpha_only:
+        candidates: List[str] = []
+        for token in re.split(r"[,;|\s]+", raw_value):
+            code = normalize_custom_gpt_code_token(
+                token,
+                allow_alpha_only=True,
+            )
+            if code:
+                candidates.append(code)
+        return candidates
     return [
         code
         for token in CUSTOM_GPT_CODE_TOKEN_RE.findall(raw_value)
@@ -3656,7 +3883,10 @@ def labeled_custom_gpt_code_values(
                 continue
             matched_field = True
             candidates.extend(
-                code_tokens_from_custom_gpt_value(match.group(1))
+                code_tokens_from_custom_gpt_value(
+                    match.group(1),
+                    allow_alpha_only=attribute == "rfrCodes",
+                )
             )
             break
     return candidates, matched_field
@@ -3668,6 +3898,171 @@ def dedupe_custom_gpt_codes(candidates: List[str]) -> List[str]:
             seen.add(code)
             deduped.append(code)
     return deduped
+def clean_custom_gpt_recommendation_line(value: Any) -> str:
+    line = re.sub(
+        r"^\s*(?:[-*•]\s+|\d+[.)]\s+)",
+        "",
+        str(value or ""),
+    ).strip()
+    return line.replace("**", "").replace("__", "").strip()
+def recommendation_complaint_decision(
+    recommendation: Dict[str, Any],
+) -> Tuple[Optional[str], str]:
+    explicit_value = str(recommendation.get("complaint") or "").strip()
+    explicit_decision = yes_no_value(explicit_value)
+    if explicit_decision:
+        return explicit_decision, "CustomGPT complaint decision"
+    exact_description = str(
+        recommendation.get("exact_description") or ""
+    ).strip()
+    rationale = str(recommendation.get("rationale") or "").strip()
+    role_text = normalized_question_label(
+        f"{exact_description} {rationale}"
+    )
+    non_complaint_markers = (
+        "concomitant product",
+        "no product specific issue",
+        "no issue was reported",
+        "no issue was alleged",
+        "no malfunction or adverse behavior",
+        "without a reported issue",
+    )
+    if any(marker in role_text for marker in non_complaint_markers):
+        evidence = exact_description or rationale
+        return "No", f"CustomGPT recommendation: {evidence}"
+    if recommendation.get("rfrCodes") and exact_description:
+        return (
+            "Yes",
+            f"CustomGPT RFR recommendation: {exact_description}",
+        )
+    return None, "No CustomGPT complaint decision"
+def parse_rfr_recommendation(
+    response_text: str,
+    source_name: str = "RFR CustomGPT",
+) -> List[Dict[str, Any]]:
+    recommendations: List[Dict[str, Any]] = []
+    current: Optional[Dict[str, Any]] = None
+    current_text_field: Optional[str] = None
+    def finish_current() -> None:
+        nonlocal current
+        if not current:
+            return
+        product = re.sub(
+            r"\s+",
+            " ",
+            str(current.get("product") or "").strip(),
+        )
+        if not product:
+            current = None
+            return
+        outputs: Dict[str, List[str]] = {}
+        for attribute in ("rfrCodes", *PRODUCT_REQUIRED_CODE_ATTRIBUTES):
+            values = dedupe_custom_gpt_codes(
+                [
+                    str(value).strip().upper()
+                    for value in current.get(attribute, [])
+                    if str(value).strip()
+                ]
+            )
+            if values:
+                outputs[attribute] = values
+        complaint_decision, complaint_basis = (
+            recommendation_complaint_decision(current)
+        )
+        role = (
+            "complaint"
+            if complaint_decision == "Yes"
+            else "concomitant"
+            if complaint_decision == "No"
+            else "unknown"
+        )
+        recommendations.append(
+            {
+                "value": product,
+                "field": "Product or System",
+                "source": source_name,
+                "page": None,
+                "role": role,
+                "role_evidence": complaint_basis,
+                "complaint_decision": complaint_decision,
+                "complaint_basis": complaint_basis,
+                "rfr_codes": outputs.get("rfrCodes", []),
+                "outputs": outputs,
+                "explicitly_stated": str(
+                    current.get("explicitly_stated") or ""
+                ).strip(),
+                "exact_description": str(
+                    current.get("exact_description") or ""
+                ).strip(),
+                "rationale": str(current.get("rationale") or "").strip(),
+                "confidence": str(current.get("confidence") or "").strip(),
+            }
+        )
+        current = None
+    for raw_line in str(response_text or "").splitlines():
+        line = clean_custom_gpt_recommendation_line(raw_line)
+        if not line:
+            continue
+        field_match = re.match(r"^([^:]{1,120}?)\s*:\s*(.*?)\s*$", line)
+        if field_match:
+            normalized_field = normalize_custom_gpt_json_key(
+                field_match.group(1)
+            )
+            target_field = RFR_RECOMMENDATION_FIELD_KEYS.get(
+                normalized_field
+            )
+            field_value = field_match.group(2).strip()
+            if target_field == "product":
+                finish_current()
+                current = {"product": field_value}
+                current_text_field = None
+                continue
+            if target_field and current is not None:
+                if target_field.lower().endswith("codes"):
+                    current.setdefault(target_field, []).extend(
+                        code_tokens_from_custom_gpt_value(
+                            field_value,
+                            allow_alpha_only=target_field == "rfrCodes",
+                        )
+                    )
+                    current_text_field = None
+                else:
+                    current[target_field] = field_value
+                    current_text_field = target_field
+                continue
+            current_text_field = None
+            continue
+        if current is not None and current_text_field:
+            existing = str(current.get(current_text_field) or "").strip()
+            current[current_text_field] = re.sub(
+                r"\s+",
+                " ",
+                f"{existing} {line}".strip(),
+            )
+    finish_current()
+    return recommendations
+def explicit_no_custom_gpt_code_response(response_text: str) -> bool:
+    for raw_line in str(response_text or "").splitlines():
+        line = clean_custom_gpt_recommendation_line(raw_line).strip(" .")
+        if re.fullmatch(
+            r"(?:none|none found|n/?a|no (?:applicable )?(?:rfr )?codes?"
+            r"(?: (?:apply|applies|found))?)",
+            line,
+            flags=re.IGNORECASE,
+        ):
+            return True
+    return False
+def explicit_no_rfr_products_response(response_text: str) -> bool:
+    for raw_line in str(response_text or "").splitlines():
+        line = clean_custom_gpt_recommendation_line(raw_line).strip(" .")
+        if re.fullmatch(
+            r"(?:no|none) (?:applicable )?(?:products?|systems?)"
+            r"(?: (?:identified|found|stated))?",
+            line,
+            flags=re.IGNORECASE,
+        ):
+            return True
+    return False
 def compare_rfr_code_sources(
     xml_codes: List[str],
     custom_gpt_codes: List[str],
@@ -3710,6 +4105,16 @@ def parse_custom_gpt_codes(
     response_text: str,
     attribute: str,
 ) -> List[str]:
+    if attribute == "rfrCodes":
+        recommendations = parse_rfr_recommendation(response_text)
+        if recommendations:
+            return dedupe_custom_gpt_codes(
+                [
+                    code
+                    for recommendation in recommendations
+                    for code in recommendation.get("rfr_codes", [])
+                ]
+            )
     structured = parse_json_from_custom_gpt_text(response_text)
     structured_values: List[Any] = []
     structured_has_code_field = False
@@ -3720,7 +4125,12 @@ def parse_custom_gpt_codes(
     if structured_has_code_field:
         candidates: List[str] = []
         for value in structured_values:
-            candidates.extend(code_tokens_from_custom_gpt_value(value))
+            candidates.extend(
+                code_tokens_from_custom_gpt_value(
+                    value,
+                    allow_alpha_only=attribute == "rfrCodes",
+                )
+            )
         return dedupe_custom_gpt_codes(candidates)
     labeled_candidates, labeled_field_found = labeled_custom_gpt_code_values(
         response_text,
@@ -3728,11 +4138,7 @@ def parse_custom_gpt_codes(
     )
     if labeled_field_found:
         return dedupe_custom_gpt_codes(labeled_candidates)
-    if re.search(
-        r"\b(?:none|no applicable codes?|no codes? applies?|not found|n/?a)\b",
-        str(response_text or ""),
-        flags=re.IGNORECASE,
-    ):
+    if explicit_no_custom_gpt_code_response(response_text):
         return []
     raise RuntimeError(
         "CustomGPT returned a response, but the requested code field "
@@ -3765,6 +4171,35 @@ def generate_custom_gpt_codes(
         custom_gpt_code_prompt(source_text, attribute),
     )
     return parse_custom_gpt_codes(response_text, attribute)
+def generate_rfr_recommendation(
+    api_token: str,
+    team: str,
+    source_text: str,
+) -> Tuple[str, List[Dict[str, Any]], List[str]]:
+    response_text = call_medtronic_custom_gpt(
+        api_token,
+        custom_gpt_id_for_code("rfrCodes", team),
+        custom_gpt_code_prompt(source_text, "rfrCodes"),
+    )
+    recommendations = parse_rfr_recommendation(
+        response_text,
+        source_name=f"RFR CustomGPT ({team})",
+    )
+    if not recommendations and not explicit_no_rfr_products_response(
+        response_text
+    ):
+        raise RuntimeError(
+            "The RFR CustomGPT response did not contain any "
+            "'Product or System:' entries."
+        )
+    rfr_codes = dedupe_custom_gpt_codes(
+        [
+            code
+            for recommendation in recommendations
+            for code in recommendation.get("rfr_codes", [])
+        ]
+    )
+    return response_text, recommendations, rfr_codes
 def call_medtronic_gpt(
     api_token: str,
     system_prompt: Optional[str],
@@ -3978,7 +4413,8 @@ with st.sidebar:
         options=list(HAZ_CUSTOM_GPT_IDS),
         index=0,
         help=(
-            "Selects the team-specific RFR CustomGPT used for comparison and "
+            "Selects the team-specific RFR CustomGPT used to define the "
+            "product recommendation and "
             "the team-specific HAZ CustomGPT used when HAZ codes are not "
             "provided by the XML."
         ),
@@ -4051,23 +4487,8 @@ return_statuses = find_product_return_statuses(
     qa_pairs,
     source_text,
 )
-product_candidates = extract_products_involved(
-    qa_pairs,
-    source_text,
-)
 event_request_id = (
     f"{document_id}:{token_fingerprint}:{event_source_fingerprint}"
-)
-product_extraction_fingerprint = hashlib.sha256(
-    (
-        f"{PRODUCT_EXTRACTION_MODEL}\n"
-        f"{PRODUCT_EXTRACTION_PROMPT}\n"
-        f"{medtronic_source}\n"
-        + json.dumps(product_candidates, sort_keys=True, ensure_ascii=True)
-    ).encode("utf-8")
-).hexdigest()
-product_request_id = (
-    f"{document_id}:{token_fingerprint}:{product_extraction_fingerprint}"
 )
 custom_code_attributes_missing_from_xml = [
     attribute
@@ -4106,37 +4527,14 @@ if st.session_state.get("medtronic_event_request_id") != event_request_id:
     st.session_state.pop("medtronic_gfe_error", None)
     st.session_state.pop("medtronic_root_cause", None)
     st.session_state.pop("medtronic_root_cause_error", None)
-if st.session_state.get("medtronic_product_request_id") != product_request_id:
-    st.session_state["medtronic_product_request_id"] = product_request_id
-    st.session_state.pop("medtronic_products_involved", None)
-    st.session_state.pop("medtronic_products_error", None)
-    st.session_state.pop("medtronic_gfe_response", None)
-    st.session_state.pop("medtronic_gfe_error", None)
 if st.session_state.get("medtronic_custom_code_request_id") != custom_code_request_id:
     st.session_state["medtronic_custom_code_request_id"] = custom_code_request_id
     st.session_state.pop("medtronic_custom_code_results", None)
     st.session_state.pop("medtronic_custom_code_errors", None)
-if (
-    "medtronic_products_involved" not in st.session_state
-    and "medtronic_products_error" not in st.session_state
-):
-    try:
-        with st.spinner(
-            f"Extracting all products with MedtronicGPT "
-            f"{PRODUCT_EXTRACTION_MODEL} (GPT-4.1)..."
-        ):
-            st.session_state["medtronic_products_involved"] = (
-                generate_products_involved(
-                    medtronic_api_token,
-                    medtronic_source,
-                    product_candidates,
-                )
-            )
-    except Exception as e:
-        st.session_state["medtronic_products_error"] = str(e)
-product_extraction_complete = "medtronic_products_involved" in st.session_state
-products_involved = st.session_state.get("medtronic_products_involved", [])
-product_extraction_error = st.session_state.get("medtronic_products_error")
+    st.session_state.pop("medtronic_rfr_recommendation", None)
+    st.session_state.pop("medtronic_rfr_response", None)
+    st.session_state.pop("medtronic_gfe_response", None)
+    st.session_state.pop("medtronic_gfe_error", None)
 summary["All outputs"] = apply_rfr_to_fdd_mapping(
     summary["All outputs"],
     rfr_to_fdd_mapping,
@@ -4153,11 +4551,13 @@ summary["All outputs"] = apply_derived_code_rules(
 if "medtronic_custom_code_results" not in st.session_state:
     custom_code_results: Dict[str, List[str]] = {}
     custom_code_errors: Dict[str, str] = {}
+    rfr_recommendation: List[Dict[str, Any]] = []
+    rfr_response_text = ""
     missing_code_labels = [
         CUSTOM_GPT_CODE_LABELS[attribute]
         for attribute in custom_code_attributes_missing_from_xml
     ]
-    custom_code_spinner = f"Generating the {team} RFR comparison"
+    custom_code_spinner = f"Generating the {team} RFR product recommendation"
     if missing_code_labels:
         custom_code_spinner += (
             " and missing " + ", ".join(missing_code_labels) + " codes"
@@ -4166,19 +4566,37 @@ if "medtronic_custom_code_results" not in st.session_state:
     with st.spinner(custom_code_spinner):
         for attribute in custom_code_attributes_to_generate:
             try:
-                codes = generate_custom_gpt_codes(
-                    medtronic_api_token,
-                    attribute,
-                    team,
-                    medtronic_source,
-                )
+                if attribute == "rfrCodes":
+                    (
+                        rfr_response_text,
+                        rfr_recommendation,
+                        codes,
+                    ) = generate_rfr_recommendation(
+                        medtronic_api_token,
+                        team,
+                        medtronic_source,
+                    )
+                else:
+                    codes = generate_custom_gpt_codes(
+                        medtronic_api_token,
+                        attribute,
+                        team,
+                        medtronic_source,
+                    )
                 custom_code_results[attribute] = codes
             except Exception as exc:
                 custom_code_errors[attribute] = str(exc)
     st.session_state["medtronic_custom_code_results"] = custom_code_results
     st.session_state["medtronic_custom_code_errors"] = custom_code_errors
+    if "rfrCodes" in custom_code_results:
+        st.session_state["medtronic_rfr_recommendation"] = rfr_recommendation
+        st.session_state["medtronic_rfr_response"] = rfr_response_text
 custom_code_results = st.session_state.get("medtronic_custom_code_results", {})
 custom_code_errors = st.session_state.get("medtronic_custom_code_errors", {})
+products_involved = st.session_state.get("medtronic_rfr_recommendation", [])
+rfr_response_text = st.session_state.get("medtronic_rfr_response", "")
+product_extraction_complete = "rfrCodes" in custom_code_results
+product_extraction_error = custom_code_errors.get("rfrCodes")
 custom_gpt_rfr_codes = custom_code_results.get("rfrCodes", [])
 rfr_code_comparison = (
     compare_rfr_code_sources(xml_rfr_codes, custom_gpt_rfr_codes)
@@ -4213,7 +4631,20 @@ for attribute in custom_code_attributes_missing_from_xml:
                 "xml_path": custom_code_gpt_ids[attribute],
             }
         )
-summary["All outputs"] = order_decision_outputs(summary["All outputs"])
+product_complaint_decisions, rfr_product_assignments = (
+    match_products_to_xml_outputs(
+        products_involved,
+        matches,
+        rfr_to_fdd_mapping,
+        rfr_to_reportability_mapping,
+        product_analysis_value,
+        return_statuses,
+    )
+)
+summary["All outputs"] = merge_product_outputs_into_summary(
+    summary["All outputs"],
+    product_complaint_decisions,
+)
 rfr_reportability = map_rfr_reportability(
     summary["All outputs"].get("rfrCodes", []),
     rfr_to_reportability_mapping,
@@ -4227,14 +4658,6 @@ summary = finalize_summary_outputs(
     summary,
     summary["All outputs"],
     rfr_reportability,
-)
-product_complaint_decisions, rfr_product_assignments = (
-    match_products_to_xml_outputs(
-        products_involved,
-        matches,
-        rfr_to_fdd_mapping,
-        rfr_to_reportability_mapping,
-    )
 )
 unassigned_product_rfr_codes = list(
     dict.fromkeys(
@@ -4315,7 +4738,8 @@ gfe_response = st.session_state.get("medtronic_gfe_response")
 gfe_error = st.session_state.get("medtronic_gfe_error")
 if product_extraction_error and not gfe_error:
     gfe_error = (
-        "GFE was not evaluated because GPT-4.1 product extraction failed."
+        "GFE was not evaluated because the RFR recommendation could not be "
+        "parsed into products."
     )
 gfe_value = (
     "Yes"
@@ -4409,9 +4833,13 @@ elif "rfrCodes" in custom_code_results:
     else:
         st.write("Neither source returned an RFR code.")
     st.caption(
-        "CustomGPT RFR codes are shown for comparison only and are not merged "
-        "into the XML-derived operational outputs."
+        "Each 'Product or System:' entry in the CustomGPT recommendation "
+        "creates one product row. Product-matched XML RFR and complaint "
+        "values override the CustomGPT recommendation."
     )
+    if rfr_response_text:
+        with st.expander(f"{team} RFR CustomGPT recommendation"):
+            st.text(rfr_response_text)
 for attribute, error in custom_code_errors.items():
     if attribute == "rfrCodes":
         continue
@@ -4459,12 +4887,34 @@ if product_complaint_decisions:
         [
             {
                 "Product": assignment["product"],
-                "Classification": assignment["classification"],
-                "RFR codes": ", ".join(assignment["rfr_codes"]),
-                "Other codes": assignment["other_codes"],
-                "Reportability": assignment["reportability"] or "",
-                "Classification basis": assignment["classification_basis"],
-                "Role evidence": assignment["role_evidence"],
+                "Complaint Decision": assignment["complaint_decision"],
+                "RFR Code/LLT": (
+                    ", ".join(assignment["rfr_codes"])
+                    or "Needs review"
+                ),
+                "Reportability Decision": (
+                    assignment["reportability_decision"] or "Needs review"
+                ),
+                "FDC Code": product_output_display(
+                    assignment["outputs"], "fdcCodes"
+                ),
+                "FDR Code": product_output_display(
+                    assignment["outputs"], "fdrCodes"
+                ),
+                "FDM Code": product_output_display(
+                    assignment["outputs"], "fdmCodes"
+                ),
+                "FDD Code": product_output_display(
+                    assignment["outputs"], "fddCodes"
+                ),
+                "Completeness": (
+                    "Complete"
+                    if assignment["required_fields_complete"]
+                    else "Needs review"
+                ),
+                "RFR source": assignment["rfr_source"],
+                "Complaint source": assignment["complaint_source"],
+                "Decision basis": assignment["classification_basis"],
                 "Matched XML answer": assignment["matched_answer"],
                 "XML match basis": assignment["match_basis"],
             }
@@ -4476,13 +4926,29 @@ if product_complaint_decisions:
         use_container_width=True,
         hide_index=True,
     )
+    st.download_button(
+        "Download product-level decisions and codes as CSV",
+        product_decision_df.to_csv(index=False).encode("utf-8"),
+        "product_level_decisions_and_codes.csv",
+        "text/csv",
+    )
+    incomplete_products = [
+        assignment["product"]
+        for assignment in product_complaint_decisions
+        if not assignment["required_fields_complete"]
+    ]
+    if incomplete_products:
+        st.warning(
+            "Reportability, FDC, FDR, FDM, or FDD still needs review for: "
+            + ", ".join(incomplete_products)
+        )
 elif product_extraction_error:
     st.error(
-        "Unable to extract products with GPT-4.1: "
+        "Unable to build products from the RFR recommendation: "
         f"{product_extraction_error}"
     )
 else:
-    st.write("None found")
+    st.write("No 'Product or System:' entries were returned.")
 st.markdown("**RFR-to-product assignments:**")
 if rfr_product_assignments:
     rfr_product_df = pd.DataFrame(
@@ -4512,7 +4978,7 @@ if rfr_product_assignments:
             + ", ".join(unassigned_product_rfr_codes)
         )
 else:
-    st.write("No XML-derived RFR codes found")
+    st.write("No RFR codes found")
 code_rows: List[Dict[str, str]] = []
 decision_rows: List[Dict[str, str]] = []
 for attribute, values in summary["All outputs"].items():
@@ -4552,9 +5018,14 @@ all_output_rows = (
             "Output": "Product classification and codes",
             "Value": (
                 f"{assignment['product']} | "
-                f"{assignment['classification']} | "
-                f"RFR: {', '.join(assignment['rfr_codes']) or 'none'} | "
-                f"{assignment['other_codes'] or 'no other product-level codes'} | "
+                f"Complaint: {assignment['complaint_decision']} | "
+                f"RFR: {', '.join(assignment['rfr_codes']) or 'Needs review'} | "
+                f"Reportability: "
+                f"{assignment['reportability_decision'] or 'Needs review'} | "
+                f"FDC: {product_output_display(assignment['outputs'], 'fdcCodes')} | "
+                f"FDR: {product_output_display(assignment['outputs'], 'fdrCodes')} | "
+                f"FDM: {product_output_display(assignment['outputs'], 'fdmCodes')} | "
+                f"FDD: {product_output_display(assignment['outputs'], 'fddCodes')} | "
                 f"{assignment['classification_basis']}"
             ),
         }
