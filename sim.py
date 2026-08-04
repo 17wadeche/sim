@@ -949,7 +949,6 @@ MEDTRONIC_GPT_API_TOKEN = os.getenv("MEDTRONIC_GPT_API_TOKEN")
 MEDTRONIC_GPT_MAX_COMPLETION_TOKENS = 2000
 CUSTOM_GPT_CODE_IDS = {
     "imeCodes": "6a691f1a03fb020cc58a9e8c",
-    "imfCodes": "6a692f2103fb020cc58ab740",
 }
 RFR_CUSTOM_GPT_IDS = {
     "North Haven": "6a710dbb833f3bc9c0bb9ac8",
@@ -962,7 +961,6 @@ HAZ_CUSTOM_GPT_IDS = {
 CUSTOM_GPT_CODE_LABELS = {
     "rfrCodes": "RFR",
     "imeCodes": "IME",
-    "imfCodes": "IMF",
     "hazCodes": "HAZ",
 }
 CUSTOM_GPT_CODE_FIELD_LABELS = {
@@ -975,7 +973,6 @@ CUSTOM_GPT_CODE_FIELD_LABELS = {
         "RFR",
     ),
     "imeCodes": ("Annex E Code", "IME Code"),
-    "imfCodes": ("Annex F Code", "IMF Code"),
     "hazCodes": ("HAZ Code",),
 }
 CUSTOM_GPT_CODE_JSON_KEYS = {
@@ -992,13 +989,6 @@ CUSTOM_GPT_CODE_JSON_KEYS = {
         "ime",
         "imecode",
         "imecodes",
-    },
-    "imfCodes": {
-        "annexfcode",
-        "annexfcodes",
-        "imf",
-        "imfcode",
-        "imfcodes",
     },
     "hazCodes": {"haz", "hazcode", "hazcodes"},
 }
@@ -1038,7 +1028,7 @@ CUSTOM_GPT_JSON_WRAPPER_KEYS = {
     "response",
     "result",
 }
-CUSTOM_GPT_CODE_PROTOCOL_VERSION = "rfr-product-recommendation-v5-xml-override"
+CUSTOM_GPT_CODE_PROTOCOL_VERSION = "rfr-product-recommendation-v6-pdf-imf-mapping"
 CUSTOM_GPT_POLL_TIMEOUT_SECONDS = 120
 CUSTOM_GPT_POLL_INTERVAL_SECONDS = 1.0
 CUSTOM_GPT_CODE_TOKEN_RE = re.compile(
@@ -1184,6 +1174,24 @@ INVESTIGATION_SUMMARY_CLOSING = (
 )
 GFE_RETURN_STATUS_QUESTION = "What is the return status?"
 GFE_RETURN_STATUS_ANSWER = "Will be returned"
+IMF_EVENT_OCCURRED_QUESTION = "Event occurred during"
+IMF_EVENT_OCCURRED_CODE_MAP = {
+    "servicing": ("Servicing", "F27"),
+    "procedure": ("Procedure", "F26"),
+    "pre op": ("Pre-Op", "F2601"),
+    "unknown": ("Unknown", "F24"),
+}
+IMF_UNSELECTED_PDF_FIELD_VALUES = {
+    "",
+    "0",
+    "false",
+    "no",
+    "none",
+    "not selected",
+    "null",
+    "off",
+    "unchecked",
+}
 RFR_FDD_MAPPING_FILENAME = "rfr_to_fdd.tsv"
 RFR_REPORTABILITY_MAPPING_FILENAME = "rfr_to_reportability.tsv"
 RFR_REPORTABILITY_VALUES = {"REPORTABLE", "NOT REPORTABLE"}
@@ -2256,6 +2264,130 @@ def finalize_summary_outputs(
     return finalized
 def normalized_question_label(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", norm(value)).strip()
+def imf_event_option_key(value: Any) -> Optional[str]:
+    normalized_value = normalized_question_label(
+        str(value or "").strip().lstrip("/")
+    )
+    question_prefix = normalized_question_label(
+        IMF_EVENT_OCCURRED_QUESTION
+    )
+    if normalized_value.startswith(question_prefix + " "):
+        normalized_value = normalized_value[len(question_prefix) + 1 :].strip()
+    if normalized_value in IMF_EVENT_OCCURRED_CODE_MAP:
+        return normalized_value
+    return None
+def selected_pdf_option(value: Any) -> bool:
+    normalized_value = normalized_question_label(
+        str(value or "").strip().lstrip("/")
+    )
+    return normalized_value not in IMF_UNSELECTED_PDF_FIELD_VALUES
+def derive_imf_mappings_from_pdf(
+    qa_pairs: List[QAPair],
+    source_pages: List[Tuple[int, str]],
+) -> List[Dict[str, Any]]:
+    question_prefix = normalized_question_label(
+        IMF_EVENT_OCCURRED_QUESTION
+    )
+    mappings: Dict[str, Dict[str, Any]] = {}
+    def add_mapping(
+        option_key: str,
+        source: str,
+        page: Optional[int],
+    ) -> None:
+        if option_key in mappings:
+            return
+        option_label, code = IMF_EVENT_OCCURRED_CODE_MAP[option_key]
+        mappings[option_key] = {
+            "question": IMF_EVENT_OCCURRED_QUESTION,
+            "answer": option_label,
+            "code": code,
+            "source": source,
+            "page": page,
+        }
+    for pair in qa_pairs:
+        normalized_question = normalized_question_label(pair.question)
+        if (
+            normalized_question == question_prefix
+            or normalized_question.endswith(" " + question_prefix)
+        ):
+            option_key = imf_event_option_key(pair.answer)
+            if option_key:
+                add_mapping(option_key, pair.source, pair.page)
+            continue
+        question_option_key = imf_event_option_key(pair.question)
+        if (
+            question_option_key
+            and normalized_question.startswith(question_prefix + " ")
+            and selected_pdf_option(pair.answer)
+        ):
+            add_mapping(question_option_key, pair.source, pair.page)
+            continue
+        if pair.source in {"PDF form field", "PDF widget field"}:
+            answer_option_key = imf_event_option_key(pair.answer)
+            normalized_answer = normalized_question_label(pair.answer)
+            if (
+                answer_option_key
+                and normalized_answer.startswith(question_prefix + " ")
+            ):
+                add_mapping(answer_option_key, pair.source, pair.page)
+    if mappings:
+        return list(mappings.values())
+    text_candidates: Dict[str, Optional[int]] = {}
+    for page, page_text in source_pages:
+        normalized_page_text = normalized_question_label(page_text)
+        for option_key in IMF_EVENT_OCCURRED_CODE_MAP:
+            phrase = question_prefix + " " + option_key
+            if re.search(
+                r"(?<![a-z0-9])" + re.escape(phrase) + r"(?![a-z0-9])",
+                normalized_page_text,
+            ):
+                text_candidates.setdefault(option_key, page)
+    # Raw page text can contain unselected form options. Only trust this
+    # fallback when it identifies one unambiguous occurrence value.
+    if len(text_candidates) == 1:
+        option_key, page = next(iter(text_candidates.items()))
+        add_mapping(option_key, "PDF extracted text", page)
+    return list(mappings.values())
+def apply_pdf_imf_mapping(
+    summary: Dict[str, Any],
+    imf_mappings: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    resolved_summary = dict(summary)
+    outputs = {
+        attribute: list(values)
+        for attribute, values in summary.get("All outputs", {}).items()
+        if attribute != "imfCodes"
+    }
+    evidence = [
+        item
+        for item in summary.get("Decision evidence", [])
+        if item.get("xml_attribute") != "imfCodes"
+    ]
+    for mapping in imf_mappings:
+        code = str(mapping["code"]).strip().upper()
+        append_unique_code(outputs, "imfCodes", code)
+        evidence.append(
+            {
+                "output_type": "Code",
+                "xml_attribute": "imfCodes",
+                "attribute": display_attribute_name("imfCodes"),
+                "value": code,
+                "raw_xml_value": code,
+                "matched_question": mapping["question"],
+                "matched_answer": mapping["answer"],
+                "matched_page": mapping.get("page"),
+                "source_tree": "Incoming PDF IMF mapping",
+                "source_version": "",
+                "xml_path": (
+                    f"{mapping['question']} > {mapping['answer']}"
+                ),
+            }
+        )
+    ordered_outputs = order_decision_outputs(outputs)
+    resolved_summary["All outputs"] = ordered_outputs
+    resolved_summary["Code groups"] = code_groups_from_outputs(ordered_outputs)
+    resolved_summary["Decision evidence"] = evidence
+    return resolved_summary
 def should_default_gfe_to_yes(
     qa_pairs: List[QAPair],
     source_text: str,
@@ -4460,6 +4592,11 @@ try:
         include_generic=DEFAULT_INCLUDE_GENERIC,
     )
     summary = summarize(matches)
+    imf_pdf_mappings = derive_imf_mappings_from_pdf(
+        qa_pairs,
+        source_pages,
+    )
+    summary = apply_pdf_imf_mapping(summary, imf_pdf_mappings)
     xml_rfr_codes = list(summary["All outputs"].get("rfrCodes", []))
     rfr_to_fdd_mapping = load_rfr_to_fdd_mapping()
     rfr_to_reportability_mapping = load_rfr_to_reportability_mapping()
