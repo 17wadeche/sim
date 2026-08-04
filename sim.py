@@ -1191,9 +1191,13 @@ ANALYSIS_LETTER_QUESTION_ALIASES = [
     "Was an analysis letter requested?",
 ]
 PRODUCT_ANALYSIS_RETURN_STATUS_QUESTION = "What is the return status?"
+PRODUCT_ANALYSIS_B18_RETURN_STATUSES = {
+    "No return-customer discarded",
+    "No return-lost",
+}
 PRODUCT_ANALYSIS_NO_RETURN_STATUSES = {
     "Implanted-Out of Service",
-    "No return-customer discarded",
+    *PRODUCT_ANALYSIS_B18_RETURN_STATUSES,
     "Asked but unknown",
     "No return-customer refused",
 }
@@ -2166,11 +2170,12 @@ def apply_derived_code_rules(
         for attribute in controlled_attributes:
             derived_outputs.pop(attribute, None)
     else:
-        normalized_discarded = normalized_question_label(
-            "No return-customer discarded"
-        )
+        normalized_b18_statuses = {
+            normalized_question_label(status)
+            for status in PRODUCT_ANALYSIS_B18_RETURN_STATUSES
+        }
         derived_outputs["fdmCodes"] = [
-            "B18" if normalized_discarded in return_statuses else "B17"
+            "B18" if normalized_b18_statuses & return_statuses else "B17"
         ]
         append_unique_code(derived_outputs, "fdrCodes", "C20")
         append_unique_code(derived_outputs, "fdcCodes", "D15")
@@ -2891,12 +2896,13 @@ def apply_product_required_code_fallbacks(
     }
     if yes_no_value(product_analysis_value) != "No":
         return resolved
-    normalized_discarded = normalized_question_label(
-        "No return-customer discarded",
-    )
+    normalized_b18_statuses = {
+        normalized_question_label(status)
+        for status in PRODUCT_ANALYSIS_B18_RETURN_STATUSES
+    }
     if not resolved.get("fdmCodes"):
         resolved["fdmCodes"] = [
-            "B18" if normalized_discarded in return_statuses else "B17"
+            "B18" if normalized_b18_statuses & return_statuses else "B17"
         ]
     if not resolved.get("fdrCodes"):
         resolved["fdrCodes"] = ["C20"]
