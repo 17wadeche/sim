@@ -1262,6 +1262,7 @@ EXPLICIT_COMPLAINT_PRODUCT_RE = re.compile(
     re.IGNORECASE,
 )
 PRODUCT_ROLE_VALUES = {"complaint", "concomitant", "unknown"}
+MULTI_PRODUCT_NON_COMPLAINT_RFR_CODE = "SENN"
 PATIENT_STATUS_LINE_RE = re.compile(
     r"^\s*\*?\s*patient\s*status\b\s*:?\s*(.*)$",
     re.IGNORECASE,
@@ -3102,6 +3103,12 @@ def match_products_to_xml_outputs(
     product_analysis_value: str,
     return_statuses: set,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    distinct_products = {
+        normalized_question_label(str(product.get("value") or ""))
+        for product in products
+        if normalized_question_label(str(product.get("value") or ""))
+    }
+    is_multi_product_event = len(distinct_products) > 1
     match_links: List[Dict[str, Any]] = []
     product_matches: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
     product_match_bases: Dict[int, List[str]] = defaultdict(list)
@@ -3177,9 +3184,11 @@ def match_products_to_xml_outputs(
             xml_outputs.get("complaint", [])
         )
         normalized_xml_decision = yes_no_value(xml_complaint_decision)
-        ai_complaint_decision = yes_no_value(
-            product.get("complaint_decision")
-        )
+        normalized_rfr_codes = {
+            str(rfr_code).strip().upper()
+            for rfr_code in final_outputs.get("rfrCodes", [])
+            if str(rfr_code).strip()
+        }
         if normalized_xml_decision == "Yes":
             classification = "Complaint"
             complaint_decision = "Yes"
@@ -3190,29 +3199,26 @@ def match_products_to_xml_outputs(
             complaint_decision = "No"
             classification_basis = "product-specific XML complaint=No"
             complaint_source = "Product-matched XML override"
-        elif ai_complaint_decision == "Yes":
-            classification = "Complaint"
-            complaint_decision = "Yes"
-            classification_basis = str(
-                product.get("complaint_basis")
-                or "RFR CustomGPT recommendation"
-            )
-            complaint_source = str(product.get("source") or "RFR CustomGPT")
-        elif ai_complaint_decision == "No":
+        elif (
+            is_multi_product_event
+            and MULTI_PRODUCT_NON_COMPLAINT_RFR_CODE
+            in normalized_rfr_codes
+        ):
             classification = "Concomitant / not a complaint"
             complaint_decision = "No"
-            classification_basis = str(
-                product.get("complaint_basis")
-                or "RFR CustomGPT recommendation"
-            )
-            complaint_source = str(product.get("source") or "RFR CustomGPT")
-        else:
-            classification = "Needs review"
-            complaint_decision = "Needs review"
             classification_basis = (
-                "no product-specific XML or CustomGPT complaint decision"
+                "missing product-specific XML complaint; multi-product "
+                f"event with RFR {MULTI_PRODUCT_NON_COMPLAINT_RFR_CODE} "
+                "defaults to No"
             )
-            complaint_source = "Needs review"
+            complaint_source = "Missing XML complaint fallback"
+        else:
+            classification = "Complaint"
+            complaint_decision = "Yes"
+            classification_basis = (
+                "missing product-specific XML complaint; defaults to Yes"
+            )
+            complaint_source = "Missing XML complaint fallback"
         matched_answers = list(
             dict.fromkeys(
                 str(row.get("pdf_answer") or "").strip()
@@ -4969,8 +4975,10 @@ elif "rfrCodes" in custom_code_results:
         st.write("Neither source returned an RFR code.")
     st.caption(
         "Each 'Product or System:' entry in the CustomGPT recommendation "
-        "creates one product row. Product-matched XML RFR and complaint "
-        "values override the CustomGPT recommendation."
+        "creates one product row. Product-matched XML complaint values take "
+        "priority. If none is mapped, Complaint defaults to Yes, except a "
+        f"{MULTI_PRODUCT_NON_COMPLAINT_RFR_CODE}-coded product in a "
+        "multi-product event defaults to No."
     )
     if rfr_response_text:
         with st.expander(f"{team} RFR CustomGPT recommendation"):
