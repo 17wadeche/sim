@@ -2893,7 +2893,6 @@ def apply_product_required_code_fallbacks(
         return resolved
     normalized_discarded = normalized_question_label(
         "No return-customer discarded",
-        "No return-lost"
     )
     if not resolved.get("fdmCodes"):
         resolved["fdmCodes"] = [
