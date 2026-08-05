@@ -1262,7 +1262,7 @@ EXPLICIT_COMPLAINT_PRODUCT_RE = re.compile(
     re.IGNORECASE,
 )
 PRODUCT_ROLE_VALUES = {"complaint", "concomitant", "unknown"}
-MULTI_PRODUCT_NON_COMPLAINT_RFR_CODE = "SENN"
+NON_COMPLAINT_FDD_ONLY_RFR_CODES = {"SENN", "SNOTCOM"}
 PATIENT_STATUS_LINE_RE = re.compile(
     r"^\s*\*?\s*patient\s*status\b\s*:?\s*(.*)$",
     re.IGNORECASE,
@@ -1920,28 +1920,16 @@ def values_for_attribute(attribute: str, raw_value: str) -> List[str]:
     value = str(raw_value or "").strip()
     return [value] if value else []
 def complaint_decision_from_values(values: List[str]) -> Optional[str]:
-    cleaned_values = [
-        str(value).strip()
+    normalized_values = [
+        yes_no_value(value)
         for value in values
         if str(value).strip()
     ]
-    normalized_values = [
-        yes_no_value(value)
-        for value in cleaned_values
-    ]
-    if "Yes" in normalized_values:
-        return "Yes"
     if "No" in normalized_values:
         return "No"
-    deduped_values: List[str] = []
-    seen = set()
-    for value in cleaned_values:
-        key = norm(value)
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped_values.append(value)
-    return ", ".join(deduped_values) if deduped_values else None
+    if "Yes" in normalized_values:
+        return "Yes"
+    return None
 def collect_decision_evidence(matches: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     evidence: List[Dict[str, Any]] = []
     for match in matches:
@@ -2203,7 +2191,7 @@ def summarize(matches: List[Dict[str, Any]]) -> Dict[str, Any]:
     complaint_values = outputs.get("complaint", [])
     complaint_decision = (
         complaint_decision_from_values(complaint_values)
-        or "Not found"
+        or "Yes"
     )
     selected_reportability = select_most_severe_reportability(outputs.get("mdr", []))
     selected_evidence: List[Dict[str, Any]] = []
@@ -3027,6 +3015,13 @@ def apply_product_required_code_fallbacks(
         attribute: list(values)
         for attribute, values in outputs.items()
     }
+    normalized_rfr_codes = {
+        str(rfr_code).strip().upper()
+        for rfr_code in resolved.get("rfrCodes", [])
+        if str(rfr_code).strip()
+    }
+    if normalized_rfr_codes & NON_COMPLAINT_FDD_ONLY_RFR_CODES:
+        return resolved
     if yes_no_value(product_analysis_value) != "No":
         return resolved
     normalized_b18_statuses = {
@@ -3088,13 +3083,36 @@ def merge_product_outputs_into_summary(
 def product_output_display(
     outputs: Dict[str, List[str]],
     attribute: str,
+    required: bool = True,
 ) -> str:
     values = [
         str(value).strip()
         for value in outputs.get(attribute, [])
         if str(value).strip()
     ]
-    return ", ".join(values) if values else "Needs review"
+    if values:
+        return ", ".join(values)
+    return "Needs review" if required else "Not required"
+def resolve_overall_complaint_decision(
+    xml_complaint_decision: Any,
+    assignments: List[Dict[str, Any]],
+) -> str:
+    if yes_no_value(xml_complaint_decision) == "No":
+        return "No"
+    product_decisions = [
+        yes_no_value(assignment.get("complaint_decision"))
+        for assignment in assignments
+    ]
+    product_decisions = [
+        decision
+        for decision in product_decisions
+        if decision is not None
+    ]
+    if product_decisions and all(
+        decision == "No" for decision in product_decisions
+    ):
+        return "No"
+    return "Yes"
 def match_products_to_xml_outputs(
     products: List[Dict[str, Any]],
     matches: List[Dict[str, Any]],
@@ -3103,12 +3121,6 @@ def match_products_to_xml_outputs(
     product_analysis_value: str,
     return_statuses: set,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    distinct_products = {
-        normalized_question_label(str(product.get("value") or ""))
-        for product in products
-        if normalized_question_label(str(product.get("value") or ""))
-    }
-    is_multi_product_event = len(distinct_products) > 1
     match_links: List[Dict[str, Any]] = []
     product_matches: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
     product_match_bases: Dict[int, List[str]] = defaultdict(list)
@@ -3140,11 +3152,6 @@ def match_products_to_xml_outputs(
         final_outputs = apply_rfr_to_reportability_mapping(
             final_outputs,
             rfr_to_reportability_mapping,
-        )
-        final_outputs = apply_product_required_code_fallbacks(
-            final_outputs,
-            product_analysis_value,
-            return_statuses,
         )
         rfr_source = str(product.get("source") or "RFR CustomGPT")
         if xml_rfr_codes:
@@ -3179,6 +3186,11 @@ def match_products_to_xml_outputs(
                 and xml_values
             ):
                 replace_output_values(final_outputs, attribute, xml_values)
+        final_outputs = apply_product_required_code_fallbacks(
+            final_outputs,
+            product_analysis_value,
+            return_statuses,
+        )
         final_outputs = order_decision_outputs(final_outputs)
         xml_complaint_decision = complaint_decision_from_values(
             xml_outputs.get("complaint", [])
@@ -3189,29 +3201,28 @@ def match_products_to_xml_outputs(
             for rfr_code in final_outputs.get("rfrCodes", [])
             if str(rfr_code).strip()
         }
-        if normalized_xml_decision == "Yes":
-            classification = "Complaint"
-            complaint_decision = "Yes"
-            classification_basis = "product-specific XML complaint=Yes"
-            complaint_source = "Product-matched XML override"
-        elif normalized_xml_decision == "No":
+        fdd_only_rfr_codes = sorted(
+            normalized_rfr_codes & NON_COMPLAINT_FDD_ONLY_RFR_CODES
+        )
+        has_fdd_only_rfr_code = bool(fdd_only_rfr_codes)
+        if normalized_xml_decision == "No":
             classification = "Not a complaint"
             complaint_decision = "No"
             classification_basis = "product-specific XML complaint=No"
             complaint_source = "Product-matched XML override"
-        elif (
-            is_multi_product_event
-            and MULTI_PRODUCT_NON_COMPLAINT_RFR_CODE
-            in normalized_rfr_codes
-        ):
+        elif has_fdd_only_rfr_code:
             classification = "Concomitant / not a complaint"
             complaint_decision = "No"
             classification_basis = (
-                "missing product-specific XML complaint; multi-product "
-                f"event with RFR {MULTI_PRODUCT_NON_COMPLAINT_RFR_CODE} "
-                "defaults to No"
+                f"RFR {', '.join(fdd_only_rfr_codes)} is a non-complaint "
+                "code; only RFR and FDD are required"
             )
-            complaint_source = "Missing XML complaint fallback"
+            complaint_source = "Product RFR override"
+        elif normalized_xml_decision == "Yes":
+            classification = "Complaint"
+            complaint_decision = "Yes"
+            classification_basis = "product-specific XML complaint=Yes"
+            complaint_source = "Product-matched XML override"
         else:
             classification = "Complaint"
             complaint_decision = "Yes"
@@ -3230,10 +3241,16 @@ def match_products_to_xml_outputs(
         reportability = select_most_severe_reportability(
             final_outputs.get("mdr", [])
         )
-        required_fields_complete = bool(reportability) and all(
-            final_outputs.get(attribute)
-            for attribute in PRODUCT_REQUIRED_CODE_ATTRIBUTES
-        )
+        if has_fdd_only_rfr_code:
+            required_fields_complete = bool(
+                final_outputs.get("rfrCodes")
+                and final_outputs.get("fddCodes")
+            )
+        else:
+            required_fields_complete = bool(reportability) and all(
+                final_outputs.get(attribute)
+                for attribute in PRODUCT_REQUIRED_CODE_ATTRIBUTES
+            )
         assignments.append(
             {
                 "product": str(product.get("value") or "").strip(),
@@ -3257,6 +3274,7 @@ def match_products_to_xml_outputs(
                 "reportability": reportability,
                 "reportability_decision": reportability,
                 "required_fields_complete": required_fields_complete,
+                "fdd_only_requirements": has_fdd_only_rfr_code,
             }
         )
     rfr_assignments: List[Dict[str, Any]] = []
@@ -4782,6 +4800,10 @@ product_complaint_decisions, rfr_product_assignments = (
         return_statuses,
     )
 )
+summary["Complaint?"] = resolve_overall_complaint_decision(
+    summary["Complaint?"],
+    product_complaint_decisions,
+)
 summary["All outputs"] = merge_product_outputs_into_summary(
     summary["All outputs"],
     product_complaint_decisions,
@@ -4793,7 +4815,11 @@ rfr_reportability = map_rfr_reportability(
 unmapped_rfr_codes = [
     str(result["rfr_code"])
     for result in rfr_reportability
-    if not result["reportability"]
+    if (
+        not result["reportability"]
+        and str(result["rfr_code"]).strip().upper()
+        not in NON_COMPLAINT_FDD_ONLY_RFR_CODES
+    )
 ]
 summary = finalize_summary_outputs(
     summary,
@@ -4975,10 +5001,9 @@ elif "rfrCodes" in custom_code_results:
         st.write("Neither source returned an RFR code.")
     st.caption(
         "Each 'Product or System:' entry in the CustomGPT recommendation "
-        "creates one product row. Product-matched XML complaint values take "
-        "priority. If none is mapped, Complaint defaults to Yes, except a "
-        f"{MULTI_PRODUCT_NON_COMPLAINT_RFR_CODE}-coded product in a "
-        "multi-product event defaults to No."
+        "creates one product row. Complaint defaults to Yes unless the "
+        "product-matched XML maps it to No or its RFR is SENN/SNOTCOM. "
+        "SENN/SNOTCOM products require only RFR and FDD."
     )
     if rfr_response_text:
         with st.expander(f"{team} RFR CustomGPT recommendation"):
@@ -5036,16 +5061,27 @@ if product_complaint_decisions:
                     or "Needs review"
                 ),
                 "Reportability Decision": (
-                    assignment["reportability_decision"] or "Needs review"
+                    assignment["reportability_decision"]
+                    or (
+                        "Not required"
+                        if assignment["fdd_only_requirements"]
+                        else "Needs review"
+                    )
                 ),
                 "FDC Code": product_output_display(
-                    assignment["outputs"], "fdcCodes"
+                    assignment["outputs"],
+                    "fdcCodes",
+                    required=not assignment["fdd_only_requirements"],
                 ),
                 "FDR Code": product_output_display(
-                    assignment["outputs"], "fdrCodes"
+                    assignment["outputs"],
+                    "fdrCodes",
+                    required=not assignment["fdd_only_requirements"],
                 ),
                 "FDM Code": product_output_display(
-                    assignment["outputs"], "fdmCodes"
+                    assignment["outputs"],
+                    "fdmCodes",
+                    required=not assignment["fdd_only_requirements"],
                 ),
                 "FDD Code": product_output_display(
                     assignment["outputs"], "fddCodes"
@@ -5082,8 +5118,10 @@ if product_complaint_decisions:
     ]
     if incomplete_products:
         st.warning(
-            "Reportability, FDC, FDR, FDM, or FDD still needs review for: "
+            "Required product codes still need review for: "
             + ", ".join(incomplete_products)
+            + ". Regular products require reportability, FDC, FDR, FDM, "
+            "and FDD; SENN/SNOTCOM products require only RFR and FDD."
         )
 elif product_extraction_error:
     st.error(
@@ -5164,10 +5202,10 @@ all_output_rows = (
                 f"Complaint: {assignment['complaint_decision']} | "
                 f"RFR: {', '.join(assignment['rfr_codes']) or 'Needs review'} | "
                 f"Reportability: "
-                f"{assignment['reportability_decision'] or 'Needs review'} | "
-                f"FDC: {product_output_display(assignment['outputs'], 'fdcCodes')} | "
-                f"FDR: {product_output_display(assignment['outputs'], 'fdrCodes')} | "
-                f"FDM: {product_output_display(assignment['outputs'], 'fdmCodes')} | "
+                f"{assignment['reportability_decision'] or ('Not required' if assignment['fdd_only_requirements'] else 'Needs review')} | "
+                f"FDC: {product_output_display(assignment['outputs'], 'fdcCodes', required=not assignment['fdd_only_requirements'])} | "
+                f"FDR: {product_output_display(assignment['outputs'], 'fdrCodes', required=not assignment['fdd_only_requirements'])} | "
+                f"FDM: {product_output_display(assignment['outputs'], 'fdmCodes', required=not assignment['fdd_only_requirements'])} | "
                 f"FDD: {product_output_display(assignment['outputs'], 'fddCodes')} | "
                 f"{assignment['classification_basis']}"
             ),
