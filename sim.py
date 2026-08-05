@@ -4422,7 +4422,6 @@ def call_medtronic_gpt(
         },
         json={
             "messages": messages,
-            "temperature": 0,
             "max_completion_tokens": MEDTRONIC_GPT_MAX_COMPLETION_TOKENS,
             "stream": False,
         },
