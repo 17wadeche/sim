@@ -1028,7 +1028,7 @@ CUSTOM_GPT_JSON_WRAPPER_KEYS = {
     "response",
     "result",
 }
-CUSTOM_GPT_CODE_PROTOCOL_VERSION = "rfr-product-recommendation-v6-pdf-imf-mapping"
+CUSTOM_GPT_CODE_PROTOCOL_VERSION = "rfr-product-recommendation-v7-imf-haz-routing"
 CUSTOM_GPT_POLL_TIMEOUT_SECONDS = 120
 CUSTOM_GPT_POLL_INTERVAL_SECONDS = 1.0
 CUSTOM_GPT_CODE_TOKEN_RE = re.compile(
@@ -1214,6 +1214,8 @@ IMF_EVENT_OCCURRED_CODE_MAP = {
     "pre op": ("Pre-Op", "F2601"),
     "unknown": ("Unknown", "F24"),
 }
+IMF_HAZ_SOH001_CODES = {"F27", "F2601"}
+IMF_HAZ_SOH001_CODE = "SOH001"
 IMF_UNSELECTED_PDF_FIELD_VALUES = {
     "",
     "0",
@@ -2410,6 +2412,65 @@ def apply_pdf_imf_mapping(
     resolved_summary["Code groups"] = code_groups_from_outputs(ordered_outputs)
     resolved_summary["Decision evidence"] = evidence
     return resolved_summary
+def apply_imf_to_haz_mapping(
+    summary: Dict[str, Any],
+) -> Tuple[Dict[str, Any], bool]:
+    matched_imf_codes = [
+        str(code).strip().upper()
+        for code in summary.get("All outputs", {}).get("imfCodes", [])
+        if str(code).strip().upper() in IMF_HAZ_SOH001_CODES
+    ]
+    if not matched_imf_codes:
+        return summary, False
+    resolved_summary = dict(summary)
+    outputs = {
+        attribute: list(values)
+        for attribute, values in summary.get("All outputs", {}).items()
+    }
+    outputs["hazCodes"] = [IMF_HAZ_SOH001_CODE]
+    ordered_outputs = order_decision_outputs(outputs)
+    evidence = [
+        item
+        for item in summary.get("Decision evidence", [])
+        if item.get("xml_attribute") != "hazCodes"
+    ]
+    evidence.append(
+        {
+            "output_type": "Code",
+            "xml_attribute": "hazCodes",
+            "attribute": display_attribute_name("hazCodes"),
+            "value": IMF_HAZ_SOH001_CODE,
+            "raw_xml_value": IMF_HAZ_SOH001_CODE,
+            "matched_question": "IMF-to-HAZ mapping",
+            "matched_answer": f"IMF code {matched_imf_codes[0]}",
+            "matched_page": None,
+            "source_tree": "IMF-to-HAZ business rule",
+            "source_version": "",
+            "xml_path": (
+                f"{matched_imf_codes[0]} > {IMF_HAZ_SOH001_CODE}"
+            ),
+        }
+    )
+    resolved_summary["All outputs"] = ordered_outputs
+    resolved_summary["Code groups"] = code_groups_from_outputs(ordered_outputs)
+    resolved_summary["Decision evidence"] = evidence
+    return resolved_summary, True
+def custom_gpt_code_attributes_to_resolve(
+    summary: Dict[str, Any],
+    haz_mapped_from_imf: bool,
+) -> List[str]:
+    return [
+        attribute
+        for attribute in CUSTOM_GPT_CODE_LABELS
+        if (
+            attribute != "rfrCodes"
+            and (
+                not haz_mapped_from_imf
+                if attribute == "hazCodes"
+                else not summary.get("All outputs", {}).get(attribute)
+            )
+        )
+    ]
 def should_default_gfe_to_yes(
     qa_pairs: List[QAPair],
     source_text: str,
@@ -4653,8 +4714,8 @@ with st.sidebar:
         help=(
             "Selects the team-specific RFR CustomGPT used to define the "
             "product recommendation and "
-            "the team-specific HAZ CustomGPT used when HAZ codes are not "
-            "provided by the XML."
+            "the team-specific HAZ CustomGPT used when IMF does not map to "
+            "F27 or F2601."
         ),
     )
     configured_token = (
@@ -4705,6 +4766,7 @@ try:
         source_pages,
     )
     summary = apply_pdf_imf_mapping(summary, imf_pdf_mappings)
+    summary, haz_mapped_from_imf = apply_imf_to_haz_mapping(summary)
     xml_rfr_codes = list(summary["All outputs"].get("rfrCodes", []))
     rfr_to_fdd_mapping = load_rfr_to_fdd_mapping()
     rfr_to_reportability_mapping = load_rfr_to_reportability_mapping()
@@ -4743,17 +4805,13 @@ dhr_request_fingerprint = hashlib.sha256(
 dhr_request_id = (
     f"{document_id}:{token_fingerprint}:{dhr_request_fingerprint}"
 )
-custom_code_attributes_missing_from_xml = [
-    attribute
-    for attribute in CUSTOM_GPT_CODE_LABELS
-    if (
-        attribute != "rfrCodes"
-        and not summary["All outputs"].get(attribute)
-    )
-]
+custom_code_attributes_to_resolve = custom_gpt_code_attributes_to_resolve(
+    summary,
+    haz_mapped_from_imf,
+)
 custom_code_attributes_to_generate = [
     "rfrCodes",
-    *custom_code_attributes_missing_from_xml,
+    *custom_code_attributes_to_resolve,
 ]
 custom_code_gpt_ids = {
     attribute: custom_gpt_id_for_code(attribute, team)
@@ -4810,14 +4868,14 @@ if "medtronic_custom_code_results" not in st.session_state:
     custom_code_errors: Dict[str, str] = {}
     rfr_recommendation: List[Dict[str, Any]] = []
     rfr_response_text = ""
-    missing_code_labels = [
+    code_labels_to_resolve = [
         CUSTOM_GPT_CODE_LABELS[attribute]
-        for attribute in custom_code_attributes_missing_from_xml
+        for attribute in custom_code_attributes_to_resolve
     ]
     custom_code_spinner = f"Generating the {team} RFR product recommendation"
-    if missing_code_labels:
+    if code_labels_to_resolve:
         custom_code_spinner += (
-            " and missing " + ", ".join(missing_code_labels) + " codes"
+            " and resolving " + ", ".join(code_labels_to_resolve) + " codes"
         )
     custom_code_spinner += " with text-only CustomGPT requests..."
     with st.spinner(custom_code_spinner):
@@ -4860,10 +4918,20 @@ rfr_code_comparison = (
     if "rfrCodes" in custom_code_results
     else []
 )
-for attribute in custom_code_attributes_missing_from_xml:
-    if summary["All outputs"].get(attribute):
+for attribute in custom_code_attributes_to_resolve:
+    if attribute not in custom_code_results:
         continue
-    for code in custom_code_results.get(attribute, []):
+    if attribute != "hazCodes" and summary["All outputs"].get(attribute):
+        continue
+    codes = custom_code_results[attribute]
+    if attribute == "hazCodes":
+        replace_output_values(summary["All outputs"], attribute, codes)
+        summary["Decision evidence"] = [
+            item
+            for item in summary.get("Decision evidence", [])
+            if item.get("xml_attribute") != attribute
+        ]
+    for code in codes:
         append_unique_code(summary["All outputs"], attribute, code)
         code_label = CUSTOM_GPT_CODE_LABELS[attribute]
         custom_gpt_name = (
@@ -4879,7 +4947,9 @@ for attribute in custom_code_attributes_missing_from_xml:
                 "value": code,
                 "raw_xml_value": code,
                 "matched_question": (
-                    f"No XML-derived {code_label} code was found"
+                    "IMF did not map to F27 or F2601"
+                    if attribute == "hazCodes"
+                    else f"No XML-derived {code_label} code was found"
                 ),
                 "matched_answer": "Text-only CustomGPT result",
                 "matched_page": None,
